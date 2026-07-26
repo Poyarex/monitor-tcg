@@ -20,7 +20,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -340,7 +340,8 @@ CATEGORIAS_VARREDURA = [
 
 LOJAS_VARREDURA = {
     "b2b.copagloja.com.br": {"nome": "Copag B2B", "metodo": "vtex",
-                              "base_url": "https://www.b2b.copagloja.com.br"},
+                              "base_url": "https://www.b2b.copagloja.com.br",
+                              "pagina_fixa": "https://www.b2b.copagloja.com.br/"},
     "lojapokemonsuper.com": {"nome": "Super TCG", "metodo": "woocommerce",
                               "base_url": "https://lojapokemonsuper.com"},
     "dalaran.com.br": {"nome": "Dalaran", "metodo": "html",
@@ -358,6 +359,35 @@ LOJAS_VARREDURA = {
 # Formatos de endereco de busca mais comuns nas plataformas brasileiras.
 # O app tenta um por um ate algum devolver resultados.
 PADROES_BUSCA_HTML = ["/buscar?q={t}", "/busca?q={t}", "/?s={t}", "/search?q={t}"]
+
+
+def _extrair_nome_link(a_tag, texto_bruto):
+    """
+    Tira o nome do produto do link, na ordem mais confiavel primeiro:
+    atributo title do link (raramente vem bagunçado), depois alt de uma
+    imagem dentro dele, e só por ultimo o texto puro cortado antes do
+    preço aparecer — util porque em vitrines o texto do link costuma vir
+    com o nome, um selo tipo "Lançamento" e o preço tudo grudado junto.
+    """
+    title = (a_tag.get("title") or "").strip()
+    if len(title) >= 12:
+        return title
+    img = a_tag.find("img")
+    if img and (img.get("alt") or "").strip() and len(img.get("alt").strip()) >= 12:
+        return img.get("alt").strip()
+    corte = PADRAO_PRECO.search(texto_bruto)
+    nome = texto_bruto[:corte.start()] if corte else texto_bruto
+    return re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
+
+
+def _inferir_franquia(nome, franquias):
+    """Tenta adivinhar a franquia pelo nome, só pra organizar a exibição."""
+    normalizado = (nome.lower().replace("é", "e").replace("ê", "e")
+                   .replace("ã", "a").replace("á", "a").replace("í", "i"))
+    for f in franquias:
+        if f in normalizado or f.replace("-", " ") in normalizado:
+            return f
+    return None
 
 
 def _nome_parece_tcg(nome):
@@ -413,7 +443,6 @@ def varrer_html(base_url, termo, timeout=15):
     Heuristico: funciona na maioria das lojas, mas o formato varia — por isso
     tenta varios padroes de endereco e le os links pelo texto.
     """
-    from urllib.parse import quote, urljoin
     for padrao in PADROES_BUSCA_HTML:
         url = base_url + padrao.format(t=quote(termo))
         try:
@@ -447,6 +476,41 @@ def varrer_html(base_url, termo, timeout=15):
     return []
 
 
+def varrer_pagina_fixa(url, timeout=15):
+    """
+    Em vez de pesquisar por termo, varre uma pagina fixa direto (ex: a
+    vitrine de lançamentos da loja) e cata o que parece produto de TCG
+    nela — usada quando a busca por palavra da loja nao e confiavel, mas
+    a propria pagina ja lista os produtos com preço no HTML.
+    """
+    r = requests.get(url, headers=CABECALHOS, timeout=timeout)
+    r.raise_for_status()
+    sopa = BeautifulSoup(r.text, "html.parser")
+    endereco = urlparse(url)
+    base_url = f"{endereco.scheme}://{endereco.netloc}"
+
+    achados, vistos = [], set()
+    for a in sopa.find_all("a", href=True):
+        texto = a.get_text(" ", strip=True)
+        if len(texto) < 12 or not _nome_parece_tcg(texto):
+            continue
+        destino = urljoin(base_url + "/", a["href"])
+        if not destino.startswith(base_url) or destino in vistos:
+            continue
+        vistos.add(destino)
+
+        minusculo = texto.lower()
+        esgotado = any(p in minusculo for p in PALAVRAS_ESGOTADO)
+        preco_m = PADRAO_PRECO.search(texto)
+        achados.append({
+            "nome": _extrair_nome_link(a, texto)[:120],
+            "url": destino,
+            "preco": converter_preco(preco_m.group(0)) if preco_m else None,
+            "em_estoque": False if esgotado else None,
+        })
+    return achados
+
+
 VARREDORES = {"vtex": varrer_vtex, "woocommerce": varrer_woocommerce, "html": varrer_html}
 
 
@@ -459,10 +523,24 @@ def varrer_loja(loja_id, franquias):
     """
     Roda a busca de cada franquia na loja escolhida e devolve a lista
     filtrada de produtos TCG + observacoes sobre o que aconteceu.
+
+    Lojas com "pagina_fixa" configurada (ex: Copag) pulam a busca por
+    termo — a pagina em si ja lista os produtos, entao e so ler ela uma
+    vez em vez de tentar adivinhar termos de busca.
     """
     loja = LOJAS_VARREDURA.get(loja_id)
     if not loja:
         return [], ["Loja desconhecida."]
+
+    if loja.get("pagina_fixa"):
+        try:
+            resultados = varrer_pagina_fixa(loja["pagina_fixa"])
+        except requests.RequestException as falha:
+            return [], [f"a pagina nao respondeu ({type(falha).__name__})"]
+        for p in resultados:
+            p["franquia"] = _inferir_franquia(p["nome"], franquias) or "novidades"
+        avisos = [] if resultados else ["nada encontrado na pagina — o layout pode ter mudado"]
+        return resultados[:80], avisos
 
     varredor = VARREDORES[loja["metodo"]]
     encontrados, vistos, avisos = [], set(), []
