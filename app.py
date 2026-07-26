@@ -20,7 +20,7 @@ import threading
 import uuid
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import requests
 from bs4 import BeautifulSoup
@@ -157,14 +157,45 @@ def converter_preco(texto):
         return None
 
 
+def _slug_da_url_vtex(url):
+    """
+    Tira o 'linkText' (slug) da URL do produto, ex:
+    .../box-display-pokemon-me05-escuridao-absoluta-028d199900000bx/p
+    -> box-display-pokemon-me05-escuridao-absoluta-028d199900000bx
+    Consultar a API por esse slug e muito mais confiavel que por palavras
+    soltas: a busca por termo e um "achismo" (pode nao encontrar nada se o
+    texto nao bater exatamente com o indice da loja); o slug e o identificador
+    exato do produto, tirado do proprio link que voce colou.
+    """
+    caminho = urlparse(url).path.strip("/")
+    if caminho.endswith("/p"):
+        caminho = caminho[:-2].rstrip("/")
+    return caminho
+
+
 def checar_vtex(produto, timeout=15):
     base = produto["base_url"].rstrip("/")
-    url = f"{base}/api/catalog_system/pub/products/search/{produto['termo_busca']}"
-    r = requests.get(url, headers=CABECALHOS, timeout=timeout)
-    r.raise_for_status()
-    itens = r.json()
+    itens = []
+
+    # Prioridade 1: busca pelo slug exato da URL do produto
+    slug = _slug_da_url_vtex(produto.get("url", ""))
+    if slug:
+        r = requests.get(f"{base}/api/catalog_system/pub/products/search/{quote(slug)}",
+                          headers=CABECALHOS, timeout=timeout)
+        if r.status_code in (200, 206):
+            itens = r.json()
+
+    # Prioridade 2 (plano B): busca por termo livre, so se o slug nao achou nada
+    if not itens and produto.get("termo_busca"):
+        r = requests.get(f"{base}/api/catalog_system/pub/products/search/{quote(produto['termo_busca'])}",
+                          headers=CABECALHOS, timeout=timeout)
+        r.raise_for_status()
+        itens = r.json()
+
     if not itens:
-        return {"em_estoque": None, "preco": None, "detalhe": "produto nao encontrado — revise o termo de busca"}
+        return {"em_estoque": None, "preco": None,
+                "detalhe": "produto nao encontrado — nem pelo link nem pelo termo de busca. Confira se a URL ainda existe na loja."}
+
     oferta = itens[0]["items"][0]["sellers"][0]["commertialOffer"]
     qtd = oferta.get("AvailableQuantity", 0)
     return {"em_estoque": qtd > 0, "preco": oferta.get("Price"), "detalhe": f"{qtd} em estoque na API"}
