@@ -1,4 +1,5 @@
-  [aviso] SENHA_APP nao definida — o app esta SEM protecao por senha.
+  [aviso] ACESSOS (ou SENHA_APP) nao definida — o app esta SEM protecao de login.
+  [aviso] CHAVE_SECRETA nao definida — todo mundo vai precisar logar de novo a cada reinício.
  * Serving Flask app 'app'
  * Debug mode: off
 WARNING: This is a development server. Do not use it in a production deployment. Use a production WSGI server instead.
