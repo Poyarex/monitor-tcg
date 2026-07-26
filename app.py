@@ -191,38 +191,58 @@ def checar_woocommerce(produto, timeout=15):
 
 
 PALAVRAS_COMPRAR = ["comprar", "adicionar ao carrinho", "adicionar à sacola", "adicionar a sacola", "add to cart"]
+PADRAO_PRECO = re.compile(r"R\$\s*(\d{1,3}(?:\.\d{3})*,\d{2})")
 
 
-def _detectar_perto_do_titulo(sopa, palavras_esgotado):
+def _extrair_preco_da_regiao(regiao):
     """
-    Versao automatica do seletor manual: em vez de procurar 'esgotado' na
-    pagina INTEIRA (que erra quando a palavra aparece em produtos
-    relacionados, rodape etc.), parte do titulo do produto (h1) e vai
-    ampliando a regiao aos poucos. No primeiro nivel em que aparece um
-    sinal, decide: 'esgotado'/'avise-me' na regiao → esgotado; botao de
-    comprar na regiao → disponivel. Empate no mesmo nivel: esgotado vence.
+    Procura um preço (R$ X,XX) dentro da região do produto. Pula preço
+    riscado (o "de R$ X" de uma promoção "de/por") quando consegue
+    reconhecer a marcação — prioriza o preço de verdade, não o cortado.
+    """
+    for texto in regiao.find_all(string=PADRAO_PRECO):
+        if texto.find_parent(["del", "s", "strike"]) is not None:
+            continue
+        m = PADRAO_PRECO.search(texto)
+        if m:
+            return converter_preco(m.group(0))
+    m = PADRAO_PRECO.search(regiao.get_text(" ", strip=True))
+    return converter_preco(m.group(0)) if m else None
+
+
+def _analisar_regiao_do_produto(sopa, palavras_esgotado):
+    """
+    Detecta estoque E preço automaticamente, partindo do título do produto
+    (h1) e ampliando a região aos poucos — a mesma ideia de um seletor
+    manual, só que descoberta sozinha. Ficar dentro dessa região evita
+    pegar preço/estoque de produtos relacionados que aparecem na mesma
+    página, fora dela.
     """
     titulo = sopa.find("h1")
     if titulo is None:
-        return None, ""
+        return None, None, ""
 
     regiao = titulo
+    preco = None
     for _ in range(6):
         if regiao.parent is None or regiao.parent.name in ("body", "html", "[document]"):
             break
         regiao = regiao.parent
 
+        if preco is None:
+            preco = _extrair_preco_da_regiao(regiao)
+
         texto = regiao.get_text(" ", strip=True).lower()
         achou = next((p for p in palavras_esgotado if p in texto), None)
         if achou:
-            return False, f"perto do titulo do produto: '{achou}'"
+            return False, preco, f"perto do titulo do produto: '{achou}'"
 
         for botao in regiao.find_all(["button", "a", "input"]):
             rotulo = (botao.get_text(" ", strip=True) or botao.get("value") or "").lower()
             if any(c in rotulo for c in PALAVRAS_COMPRAR):
-                return True, "botao de compra presente na area do produto"
+                return True, preco, "botao de compra presente na area do produto"
 
-    return None, ""
+    return None, preco, ""
 
 
 def checar_html(produto, timeout=15):
@@ -240,9 +260,10 @@ def checar_html(produto, timeout=15):
             texto = elemento.get_text(strip=True).lower()
             achou = next((pal for pal in palavras if pal in texto), None)
             em_estoque, detalhe = achou is None, f"trecho lido: {texto[:60]}"
+        _, preco, _ = _analisar_regiao_do_produto(sopa, palavras)  # so aproveita o preco automatico aqui
     else:
-        # 1a tentativa: so a regiao do produto (precisa, evita falso esgotado)
-        em_estoque, detalhe = _detectar_perto_do_titulo(sopa, palavras)
+        # 1a tentativa: so a regiao do produto (precisa, evita falso esgotado e pega o preco junto)
+        em_estoque, preco, detalhe = _analisar_regiao_do_produto(sopa, palavras)
         # 2a tentativa: pagina inteira (menos precisa, mas melhor que nada)
         if em_estoque is None:
             texto = sopa.get_text(" ", strip=True).lower()
@@ -250,11 +271,13 @@ def checar_html(produto, timeout=15):
             em_estoque = achou is None
             detalhe = f"achei a palavra '{achou}' na pagina (busca ampla)" if achou else "nenhum sinal de esgotado na pagina"
 
-    preco = None
+    # Seletor manual de preco, quando configurado, tem prioridade sobre o automatico
     if produto.get("seletor_preco"):
         el = sopa.select_one(produto["seletor_preco"])
         if el:
-            preco = converter_preco(el.get_text(strip=True))
+            preco_manual = converter_preco(el.get_text(strip=True))
+            if preco_manual is not None:
+                preco = preco_manual
 
     return {"em_estoque": em_estoque, "preco": preco, "detalhe": detalhe}
 
