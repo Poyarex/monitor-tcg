@@ -14,9 +14,11 @@ internet.
 import base64
 import json
 import os
+import random
 import re
 import smtplib
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from email.mime.text import MIMEText
@@ -120,7 +122,103 @@ CABECALHOS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                     "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"),
     "Accept-Language": "pt-BR,pt;q=0.9",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
+
+# ============================================================================
+# ACESSO EDUCADO AS LOJAS — e isto que evita o IP do Render tomar bloqueio
+#
+# O que derruba um monitor nao e visitar a loja: e visitar rapido demais,
+# sempre no mesmo ritmo, e continuar batendo na porta depois que a loja ja
+# pediu pra parar. As tres regras abaixo resolvem os tres casos:
+#
+#   1. PAUSA entre dois acessos ao MESMO site (sites diferentes nao se
+#      atrapalham — o relogio e separado por dominio).
+#   2. CASTIGO: se a loja responder 429 / 403 / 503 ("devagar" ou "sai
+#      daqui"), o app para de falar com ela por um tempo, que dobra a cada
+#      nova recusa. E o oposto do que um robo burro faz.
+#   3. ARMADILHAS: alguns sites (a Devir e um deles) escondem um link que
+#      so um robo seguiria, e banem quem entra nele. Esses caminhos ficam
+#      na lista negra e o app se recusa a abrir.
+#
+# Tudo isso e ligado de uma vez so, trocando o requests.get por uma versao
+# educada — o resto do arquivo continua escrito igual, sem precisar mudar
+# cada chamada na mao.
+# ============================================================================
+
+PAUSA_MINIMA = 3.0          # segundos entre dois acessos ao mesmo site
+CASTIGO_INICIAL = 300       # 5 min de silencio na primeira recusa
+CASTIGO_MAXIMO = 3 * 3600   # teto: 3 horas
+
+# Caminhos-armadilha: NUNCA abrir, em nenhum site.
+CAMINHOS_PROIBIDOS = ("/bnegro", "/honeypot", "/trap", "/spider-trap")
+
+_sessao = requests.Session()          # reaproveita a conexao: mais leve pra loja
+_trava_rede = threading.Lock()
+_ultimo_acesso = {}                   # dominio -> quando podemos bater de novo
+_castigo_ate = {}                     # dominio -> ate quando ficar quieto
+_recusas = {}                         # dominio -> quantas recusas seguidas
+
+
+def _dominio_de(url):
+    return urlparse(url).netloc.lower()
+
+
+def _esperar_a_vez(dominio):
+    """Reserva o proximo horario livre desse dominio e espera chegar nele."""
+    with _trava_rede:
+        agora = time.time()
+        livre_em = _ultimo_acesso.get(dominio, 0)
+        espera = max(0.0, livre_em - agora)
+        # o proximo so pode entrar depois da pausa + um tempinho aleatorio,
+        # pra nao ficar com a cadencia cronometrada de robo
+        _ultimo_acesso[dominio] = agora + espera + PAUSA_MINIMA + random.uniform(0, 1.5)
+    if espera > 0:
+        time.sleep(espera)
+
+
+def _castigar(dominio, resposta):
+    """A loja reclamou: fica um tempo sem falar com ela (dobrando a cada vez)."""
+    vezes = _recusas.get(dominio, 0) + 1
+    _recusas[dominio] = vezes
+    pausa = CASTIGO_INICIAL * (2 ** (vezes - 1))
+    pedido = (resposta.headers.get("Retry-After") or "").strip()
+    if pedido.isdigit():
+        pausa = max(pausa, int(pedido))   # se a loja disse quanto, obedece
+    _castigo_ate[dominio] = time.time() + min(pausa, CASTIGO_MAXIMO)
+
+
+def buscar(url, **kwargs):
+    """requests.get com pausa, castigo e lista negra. Use sempre esta."""
+    caminho = (urlparse(url).path or "").lower()
+    if any(caminho.startswith(p) for p in CAMINHOS_PROIBIDOS):
+        raise requests.RequestException(f"caminho-armadilha bloqueado: {url}")
+
+    dominio = _dominio_de(url)
+    faltando = _castigo_ate.get(dominio, 0) - time.time()
+    if faltando > 0:
+        raise requests.RequestException(
+            f"{dominio} pediu pausa — voltamos daqui a {int(faltando // 60) + 1} min")
+
+    _esperar_a_vez(dominio)
+
+    kwargs.setdefault("headers", CABECALHOS)
+    kwargs.setdefault("timeout", 20)
+    resposta = _sessao.get(url, **kwargs)
+
+    if resposta.status_code in (403, 429, 503):
+        _castigar(dominio, resposta)
+    elif resposta.ok:
+        _recusas[dominio] = 0     # comportou: zera a ficha
+
+    return resposta
+
+
+# Liga a versao educada no lugar da normal. A partir daqui, todo
+# "requests.get" deste arquivo ja sai com pausa e respeitando castigo.
+# (requests.post continua o original — Discord e Telegram sao nossos, nao
+# precisam de pausa.)
+requests.get = buscar
 
 PALAVRAS_ESGOTADO = [
     "esgotado", "indisponivel", "indisponível", "fora de estoque",
@@ -135,6 +233,8 @@ PLATAFORMAS_CONHECIDAS = {
     "paladinsgames.com.br": "html",
     "buscaintegrada.com.br": "html",
     "epicgame.com.br": "html",
+    "twoheadgames.com.br": "html",
+    "empresas.devir.com.br": "html",
 }
 
 
@@ -329,7 +429,7 @@ def _analisar_regiao_do_produto(sopa, palavras_esgotado):
 def checar_html(produto, timeout=15):
     r = requests.get(produto["url"], headers=CABECALHOS, timeout=timeout)
     r.raise_for_status()
-    sopa = BeautifulSoup(r.text, "html.parser")
+    sopa = BeautifulSoup(r.content, "html.parser")
     palavras = [pal.lower() for pal in (produto.get("palavras_esgotado") or PALAVRAS_ESGOTADO)]
 
     seletor = produto.get("seletor_estoque")
@@ -415,6 +515,43 @@ LOJAS_VARREDURA = {
                                "base_url": "https://www.buscaintegrada.com.br"},
     "epicgame.com.br": {"nome": "Epic Game (pode bloquear)", "metodo": "html",
                          "base_url": "https://www.epicgame.com.br"},
+
+    # Two Head Games — plataforma Tray. As paginas de categoria ja trazem
+    # nome, preco e promocao no HTML, sem login. E a melhor das tres novas.
+    # (A pagina vem em latin-1; quem resolve isso e o BeautifulSoup(r.content).)
+    "twoheadgames.com.br": {"nome": "Two Head Games", "metodo": "html",
+                             "base_url": "https://www.twoheadgames.com.br",
+                             "pagina_fixa": [
+                                 "https://www.twoheadgames.com.br/pokemon/booster",
+                                 "https://www.twoheadgames.com.br/pokemon/box",
+                                 "https://www.twoheadgames.com.br/pokemon/box-especial",
+                                 "https://www.twoheadgames.com.br/pokemon/blister-triplo",
+                                 "https://www.twoheadgames.com.br/pokemon/elite-trainer-box",
+                                 "https://www.twoheadgames.com.br/pokemon/latas",
+                                 "https://www.twoheadgames.com.br/pokemon/deck",
+                                 "https://www.twoheadgames.com.br/yugioh/booster",
+                                 "https://www.twoheadgames.com.br/yugioh/box",
+                                 "https://www.twoheadgames.com.br/yugioh/mega-lata",
+                                 "https://www.twoheadgames.com.br/magic/box-booster",
+                                 "https://www.twoheadgames.com.br/magic/commander",
+                                 "https://www.twoheadgames.com.br/magic/pre-venda",
+                                 "https://www.twoheadgames.com.br/colecionaveis/one-piece",
+                                 "https://www.twoheadgames.com.br/colecionaveis/gundam-card-game",
+                             ]},
+
+    # Devir Empresas — portal B2B (OpenCart). O catalogo e publico, mas
+    # PRECO e ESTOQUE so aparecem depois de logar como lojista aprovado.
+    # Serve pra saber que um produto novo entrou no catalogo; nao serve
+    # (ainda) pra confiar em "disponivel" nem em preco.
+    "empresas.devir.com.br": {"nome": "Devir Empresas (so catalogo, sem preco)",
+                               "metodo": "html",
+                               "base_url": "https://empresas.devir.com.br",
+                               "pagina_fixa": [
+                                   "https://empresas.devir.com.br/estampas/pokemon",
+                                   "https://empresas.devir.com.br/estampas/yu-gi-oh",
+                                   "https://empresas.devir.com.br/estampas/magic",
+                                   "https://empresas.devir.com.br/acessorios/acessorioscards",
+                               ]},
 }
 
 # Formatos de endereco de busca mais comuns nas plataformas brasileiras.
@@ -512,7 +649,7 @@ def varrer_html(base_url, termo, timeout=15):
             continue
         if r.status_code != 200:
             continue
-        sopa = BeautifulSoup(r.text, "html.parser")
+        sopa = BeautifulSoup(r.content, "html.parser")
         achados, vistos = [], set()
         for a in sopa.find_all("a", href=True):
             texto = a.get_text(" ", strip=True)
@@ -546,7 +683,7 @@ def varrer_pagina_fixa(url, timeout=15):
     """
     r = requests.get(url, headers=CABECALHOS, timeout=timeout)
     r.raise_for_status()
-    sopa = BeautifulSoup(r.text, "html.parser")
+    sopa = BeautifulSoup(r.content, "html.parser")
     endereco = urlparse(url)
     base_url = f"{endereco.scheme}://{endereco.netloc}"
 
