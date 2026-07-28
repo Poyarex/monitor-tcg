@@ -445,12 +445,37 @@ def checar_html(produto, timeout=15):
     else:
         # 1a tentativa: so a regiao do produto (precisa, evita falso esgotado e pega o preco junto)
         em_estoque, preco, detalhe = _analisar_regiao_do_produto(sopa, palavras)
-        # 2a tentativa: pagina inteira (menos precisa, mas melhor que nada)
+        # 2a tentativa: pagina inteira — MAS sem poder condenar sozinha.
+        #
+        # ERA AQUI O FALSO "ESGOTADO": a pagina de um produto disponivel
+        # quase sempre contem a palavra "esgotado" em OUTRO lugar (a
+        # prateleira de "produtos relacionados", o widget "avise-me quando
+        # chegar" do rodape, um item da mesma colecao). A busca ampla lia
+        # essa palavra e marcava o produto como esgotado.
+        #
+        # Agora a palavra solta so vale se NAO houver botao de compra na
+        # pagina. Se existe botao de compra, o produto esta a venda e a
+        # palavra veio de outro bloco — resultado fica "nao sei" em vez de
+        # um "esgotado" errado.
         if em_estoque is None:
             texto = sopa.get_text(" ", strip=True).lower()
             achou = next((pal for pal in palavras if pal in texto), None)
-            em_estoque = achou is None
-            detalhe = f"achei a palavra '{achou}' na pagina (busca ampla)" if achou else "nenhum sinal de esgotado na pagina"
+
+            tem_botao_compra = any(
+                any(c in ((b.get_text(" ", strip=True) or b.get("value") or "").lower())
+                    for c in PALAVRAS_COMPRAR)
+                for b in sopa.find_all(["button", "a", "input"])
+            )
+
+            if tem_botao_compra:
+                em_estoque = True
+                detalhe = "botao de compra encontrado na pagina (busca ampla)"
+            elif achou:
+                em_estoque = False
+                detalhe = f"sem botao de compra e achei '{achou}' na pagina (busca ampla)"
+            else:
+                em_estoque = None
+                detalhe = "nao deu pra concluir — sem botao de compra e sem sinal de esgotado"
 
     # Seletor manual de preco, quando configurado, tem prioridade sobre o automatico
     if produto.get("seletor_preco"):
@@ -486,6 +511,11 @@ CATEGORIAS_VARREDURA = [
     "booster", "box", "display", "deck", "blister", "lata", "latas", "kit",
     "pré-lançamento", "pre-lancamento", "pré lançamento", "pre release", "prerelease",
     "bundle", "treinador avançado", "etb", "estrutural", "starter", "pacote",
+    # acrescentados: nomes que apareciam em pre-venda e colecionador e
+    # ficavam de fora do filtro (ex: "Collector Booster" ja passava, mas
+    # "Commander" e "Pré-venda" sozinhos, nao).
+    "collector", "colecionador", "commander", "tin", "caixa", "case",
+    "pré-venda", "pre-venda", "pré venda", "booster box", "gift",
 ]
 
 LOJAS_VARREDURA = {
@@ -578,6 +608,96 @@ def _extrair_nome_link(a_tag, texto_bruto):
     return re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
 
 
+def _regiao_do_card(a_tag, niveis=4):
+    """
+    Sobe do link do produto ate o "card" que o contem.
+
+    POR QUE ISSO EXISTE: em vitrine de loja, o link costuma envolver so a
+    imagem e o nome. O PRECO e o selo "Esgotado" ficam do lado de fora do
+    link, como irmaos, dentro do mesmo card. Quem le so o texto do <a>
+    nunca ve o preco (era o caso da Copag) e nunca ve o esgotado.
+
+    Para de subir quando a regiao passa a conter mais de um link de
+    produto — sinal de que ja saiu do card e entrou na grade inteira
+    (subir demais faria pegar o preco do produto vizinho).
+    """
+    regiao = a_tag
+    for _ in range(niveis):
+        pai = regiao.parent
+        if pai is None or pai.name in ("body", "html", "[document]"):
+            break
+        if _tem_outro_produto(pai):
+            break          # o pai ja e a grade: o card era o nivel anterior
+        regiao = pai
+    return regiao
+
+
+def _tem_outro_produto(elemento):
+    """
+    Diz se um elemento ja engloba MAIS DE UM produto.
+
+    E o freio do _regiao_do_card: sem ele a regiao sobe ate a grade inteira
+    e o produto acaba herdando o preco (ou o "Esgotado") do vizinho.
+
+    Dois sinais, porque nem toda vitrine usa imagem:
+      - mais de um link contendo imagem  -> mais de um card
+      - mais de dois enderecos distintos -> idem (um card sozinho costuma
+        repetir o mesmo link na imagem, no nome e no botao)
+    """
+    links = elemento.find_all("a", href=True)
+    if sum(1 for a in links if a.find("img")) > 1:
+        return True
+    return len({a["href"] for a in links}) > 2
+
+
+# Classes/atributos que marcam o preço ANTIGO de uma promoção "de/por".
+# Serve pra não alertar o preço riscado no lugar do que você realmente paga.
+_MARCAS_PRECO_ANTIGO = ("old", "regular", "listprice", "de-por", "antigo", "riscado")
+
+
+def _preco_do_card(a_tag, texto_link):
+    """
+    Acha o preço do produto: primeiro no texto do próprio link, e se não
+    houver (o caso mais comum), na região do card ao redor dele.
+    Ignora preço riscado, tanto por marcação (<del>/<s>) quanto por classe.
+    """
+    achado = PADRAO_PRECO.search(texto_link)
+    if achado:
+        return converter_preco(achado.group(0))
+
+    regiao = _regiao_do_card(a_tag)
+    for texto in regiao.find_all(string=PADRAO_PRECO):
+        pai = texto.find_parent(["del", "s", "strike"])
+        if pai is not None:
+            continue
+        classes = " ".join(
+            (texto.parent.get("class") or []) if texto.parent else []
+        ).lower()
+        if any(marca in classes for marca in _MARCAS_PRECO_ANTIGO):
+            continue
+        m = PADRAO_PRECO.search(texto)
+        if m:
+            return converter_preco(m.group(0))
+
+    m = PADRAO_PRECO.search(regiao.get_text(" ", strip=True))
+    return converter_preco(m.group(0)) if m else None
+
+
+def _esgotado_no_card(a_tag, texto_link):
+    """
+    Diz se o card está marcado como esgotado. Olha o texto do link e a
+    região do card — muitas lojas põem o selo "Esgotado" fora do link.
+    Devolve None (não sei) quando não há nenhum sinal.
+    """
+    if any(p in texto_link.lower() for p in PALAVRAS_ESGOTADO):
+        return True
+    regiao = _regiao_do_card(a_tag)
+    texto_regiao = regiao.get_text(" ", strip=True).lower()
+    if any(p in texto_regiao for p in PALAVRAS_ESGOTADO):
+        return True
+    return None
+
+
 def _inferir_franquia(nome, franquias):
     """Tenta adivinhar a franquia pelo nome, só pra organizar a exibição."""
     normalizado = (nome.lower().replace("é", "e").replace("ê", "e")
@@ -653,21 +773,27 @@ def varrer_html(base_url, termo, timeout=15):
         achados, vistos = [], set()
         for a in sopa.find_all("a", href=True):
             texto = a.get_text(" ", strip=True)
-            if len(texto) < 12 or not _nome_parece_tcg(texto):
+            # Nas paginas de busca, o selo "Esgotado" costuma vir grudado no
+            # texto do link do produto. Aqui a gente separa: vira status, e
+            # sai do nome.
+            nome = _extrair_nome_link(a, texto)
+            nome = re.sub(r"(esgotado|indispon[ií]vel|fora de estoque|sold out|avise-?me( quando chegar)?)",
+                           "", nome, flags=re.IGNORECASE)
+            nome = re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
+
+            # Filtra pelo nome ja resolvido (title/alt), nao pelo texto cru:
+            # links so-imagem tambem entram agora.
+            if len(nome) < 12 or not _nome_parece_tcg(nome):
                 continue
+
             destino = urljoin(base_url + "/", a["href"])
             if not destino.startswith(base_url) or destino in vistos:
                 continue
             vistos.add(destino)
-            # Nas paginas de busca, o selo "Esgotado" costuma vir grudado no
-            # texto do link do produto. Aqui a gente separa: vira status, e
-            # sai do nome.
-            minusculo = texto.lower()
-            esgotado = any(p in minusculo for p in PALAVRAS_ESGOTADO)
-            nome = re.sub(r"(esgotado|indispon[ií]vel|fora de estoque|sold out|avise-?me( quando chegar)?)",
-                           "", texto, flags=re.IGNORECASE)
-            nome = re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
-            achados.append({"nome": nome[:120], "url": destino, "preco": None,
+
+            esgotado = _esgotado_no_card(a, texto)
+            achados.append({"nome": nome[:120], "url": destino,
+                             "preco": _preco_do_card(a, texto),
                              "em_estoque": False if esgotado else None})
         if achados:
             return achados
@@ -690,20 +816,26 @@ def varrer_pagina_fixa(url, timeout=15):
     achados, vistos = [], set()
     for a in sopa.find_all("a", href=True):
         texto = a.get_text(" ", strip=True)
-        if len(texto) < 12 or not _nome_parece_tcg(texto):
+
+        # IMPORTANTE: resolve o nome ANTES de filtrar.
+        # Antes o filtro rodava no texto cru do link e descartava todo
+        # produto cujo link e so a imagem (texto vazio) — o nome real
+        # estava no title/alt e nunca era testado. Era por isso que a
+        # pre-venda da Dalaran nao aparecia na varredura.
+        nome = _extrair_nome_link(a, texto)
+        if len(nome) < 12 or not _nome_parece_tcg(nome):
             continue
+
         destino = urljoin(base_url + "/", a["href"])
         if not destino.startswith(base_url) or destino in vistos:
             continue
         vistos.add(destino)
 
-        minusculo = texto.lower()
-        esgotado = any(p in minusculo for p in PALAVRAS_ESGOTADO)
-        preco_m = PADRAO_PRECO.search(texto)
+        esgotado = _esgotado_no_card(a, texto)
         achados.append({
-            "nome": _extrair_nome_link(a, texto)[:120],
+            "nome": nome[:120],
             "url": destino,
-            "preco": converter_preco(preco_m.group(0)) if preco_m else None,
+            "preco": _preco_do_card(a, texto),
             "em_estoque": False if esgotado else None,
         })
     return achados
