@@ -147,8 +147,14 @@ CABECALHOS = {
 # ============================================================================
 
 PAUSA_MINIMA = 3.0          # segundos entre dois acessos ao mesmo site
-CASTIGO_INICIAL = 300       # 5 min de silencio na primeira recusa
-CASTIGO_MAXIMO = 3 * 3600   # teto: 3 horas
+CASTIGO_INICIAL = 120       # 2 min de silencio na primeira recusa
+CASTIGO_MAXIMO = 45 * 60    # teto: 45 min
+#
+# O teto era de 3 horas. Na pratica, um unico 403 (comum quando a loja ve o
+# IP de datacenter da hospedagem) fazia a loja inteira sumir do painel pelo
+# resto da tarde — varios produtos "sem resposta" ao mesmo tempo, sem o
+# usuario entender por que. 45 min mantem a educacao com a loja e devolve o
+# monitor ao ar no mesmo dia. Da pra zerar na mao pelo /diagnostico.
 
 # Caminhos-armadilha: NUNCA abrir, em nenhum site.
 CAMINHOS_PROIBIDOS = ("/bnegro", "/honeypot", "/trap", "/spider-trap")
@@ -347,6 +353,21 @@ def checar_vtex(produto, timeout=15):
             return {"em_estoque": em_estoque, "preco": casado["preco"],
                     "detalhe": "encontrado na vitrine da loja (API indisponivel)"}
 
+    # Ultima tentativa antes de desistir: ler a propria pagina do produto e
+    # pegar o bloco de dados oficial (JSON-LD). Nas lojas VTEX IO esse bloco
+    # vem no HTML mesmo com a pagina montada por JavaScript — e o caminho
+    # que salva a Copag quando as duas APIs falham.
+    try:
+        r = requests.get(produto["url"], headers=CABECALHOS, timeout=timeout)
+        if r.ok:
+            sopa = BeautifulSoup(r.content, "html.parser")
+            est, preco, _ = _ler_dados_estruturados(sopa)
+            if est is not None:
+                return {"em_estoque": est, "preco": preco,
+                        "detalhe": "dados oficiais da pagina do produto (API fora)"}
+    except requests.RequestException:
+        pass
+
     return {"em_estoque": None, "preco": None,
             "detalhe": "API indisponivel e o produto nao apareceu em nenhuma vitrine configurada agora"}
 
@@ -360,7 +381,11 @@ def checar_woocommerce(produto, timeout=15):
         return checar_html(produto, timeout=timeout)
     itens = r.json()
     if not itens:
-        return {"em_estoque": None, "preco": None, "detalhe": "produto nao encontrado — revise o termo de busca"}
+        # A busca por termo da API nao achou (o termo sai da URL e nem sempre
+        # bate com o indice da loja). Em vez de desistir e deixar o produto
+        # mudo, le a pagina do produto — que e o endereco exato que o usuario
+        # colou e nao depende de acertar palavra nenhuma.
+        return checar_html(produto, timeout=timeout)
     item = itens[0]
     preco = None
     precos = item.get("prices") or {}
@@ -389,6 +414,123 @@ def _extrair_preco_da_regiao(regiao):
             return converter_preco(m.group(0))
     m = PADRAO_PRECO.search(regiao.get_text(" ", strip=True))
     return converter_preco(m.group(0)) if m else None
+
+
+_DISPONIVEL_SCHEMA = ("instock", "in_stock", "limitedavailability", "onlineonly",
+                       "preorder", "presale", "backorder")
+_INDISPONIVEL_SCHEMA = ("outofstock", "out_of_stock", "soldout", "sold_out",
+                         "discontinued")
+
+
+def _normalizar_disponibilidade(valor):
+    """
+    Traduz o campo 'availability' do padrao schema.org para True/False/None.
+    Vem em formatos variados: 'InStock', 'http://schema.org/InStock',
+    'https://schema.org/OutOfStock', 'out of stock'...
+    """
+    if not valor:
+        return None
+    texto = str(valor).strip().lower().rsplit("/", 1)[-1].replace(" ", "").replace("-", "")
+    if any(marca in texto for marca in _INDISPONIVEL_SCHEMA):
+        return False
+    if any(marca in texto for marca in _DISPONIVEL_SCHEMA):
+        return True
+    return None
+
+
+def _achatar_json(no):
+    """Percorre um JSON aninhado e devolve todos os dicionarios de dentro."""
+    if isinstance(no, dict):
+        yield no
+        for valor in no.values():
+            yield from _achatar_json(valor)
+    elif isinstance(no, list):
+        for item in no:
+            yield from _achatar_json(item)
+
+
+def _ler_dados_estruturados(sopa):
+    """
+    Le o bloco de dados que a loja publica para o Google Shopping
+    (JSON-LD schema.org/Product) e, se nao houver, as meta tags de produto.
+
+    POR QUE ISSO E O CONSERTO PRINCIPAL DO "SEM RESPOSTA":
+    quando a loja monta a pagina por JavaScript (Copag e outras VTEX IO sao
+    assim), o HTML que chega aqui vem praticamente vazio — sem titulo, sem
+    preco, sem botao de comprar. Nenhuma heuristica acha nada, e o produto
+    fica sem resposta. Mas esse bloco de dados vem PRONTO no HTML mesmo
+    nessas lojas, porque senao o produto nao apareceria no Google. E, de
+    quebra, e informacao declarada pela propria loja: nao e chute.
+
+    Devolve (em_estoque, preco, detalhe) — qualquer um pode vir None.
+    """
+    import json as _json
+
+    # --- 1. JSON-LD (o mais completo e o mais comum) ---
+    for bloco in sopa.find_all("script", type="application/ld+json"):
+        try:
+            dados = _json.loads(bloco.string or bloco.get_text() or "")
+        except (ValueError, TypeError):
+            continue
+        for no in _achatar_json(dados):
+            tipo = no.get("@type") or no.get("type") or ""
+            tipos = tipo if isinstance(tipo, list) else [tipo]
+            if not any(str(t).lower() == "product" for t in tipos):
+                continue
+            ofertas = no.get("offers") or {}
+            for oferta in _achatar_json(ofertas):
+                disponivel = _normalizar_disponibilidade(
+                    oferta.get("availability") or oferta.get("availabilityStatus"))
+                preco_bruto = oferta.get("price") or oferta.get("lowPrice")
+                preco = None
+                if preco_bruto is not None:
+                    try:
+                        preco = float(str(preco_bruto).replace(",", "."))
+                    except ValueError:
+                        preco = converter_preco(str(preco_bruto))
+                if disponivel is not None or preco is not None:
+                    return disponivel, preco, "dados oficiais da loja (JSON-LD)"
+
+    # --- 2. Meta tags (Open Graph / product) — plano B ---
+    def meta(*nomes):
+        for nome in nomes:
+            el = (sopa.find("meta", property=nome)
+                  or sopa.find("meta", attrs={"name": nome})
+                  or sopa.find("meta", attrs={"itemprop": nome}))
+            if el and el.get("content"):
+                return el["content"]
+        return None
+
+    disponivel = _normalizar_disponibilidade(
+        meta("product:availability", "og:availability", "availability"))
+    preco_meta = meta("product:price:amount", "og:price:amount", "price")
+    preco = None
+    if preco_meta:
+        try:
+            preco = float(str(preco_meta).replace(",", "."))
+        except ValueError:
+            preco = converter_preco(str(preco_meta))
+    if disponivel is not None or preco is not None:
+        return disponivel, preco, "dados oficiais da loja (meta tags)"
+
+    return None, None, ""
+
+
+def _pagina_e_casca_js(sopa):
+    """
+    Detecta a pagina que chega 'vazia' porque a loja monta tudo por
+    JavaScript. Serve pra dar um recado claro em vez de um silencio.
+    """
+    corpo = sopa.find("body")
+    if corpo is None:
+        return True
+    texto = corpo.get_text(" ", strip=True)
+    if len(texto) > 800:
+        return False
+    marcas = ("__NEXT_DATA__", "__INITIAL_STATE__", "window.__", "id=\"root\"",
+              "id=\"app\"", "vtex.render", "nuxt")
+    bruto = str(sopa)[:20000].lower()
+    return any(m.lower() in bruto for m in marcas)
 
 
 def _analisar_regiao_do_produto(sopa, palavras_esgotado):
@@ -432,6 +574,25 @@ def checar_html(produto, timeout=15):
     sopa = BeautifulSoup(r.content, "html.parser")
     palavras = [pal.lower() for pal in (produto.get("palavras_esgotado") or PALAVRAS_ESGOTADO)]
 
+    # PRIMEIRO DE TUDO: o que a propria loja declara (JSON-LD / meta tags).
+    # E mais confiavel que qualquer leitura visual e funciona ate quando a
+    # pagina vem montada por JavaScript. So nao usa se o usuario configurou
+    # um seletor manual — nesse caso a escolha dele manda.
+    if not produto.get("seletor_estoque"):
+        est_oficial, preco_oficial, detalhe_oficial = _ler_dados_estruturados(sopa)
+        if est_oficial is not None:
+            preco_final = preco_oficial
+            if produto.get("seletor_preco"):
+                el = sopa.select_one(produto["seletor_preco"])
+                if el:
+                    manual = converter_preco(el.get_text(strip=True))
+                    if manual is not None:
+                        preco_final = manual
+            return {"em_estoque": est_oficial, "preco": preco_final,
+                    "detalhe": detalhe_oficial}
+    else:
+        est_oficial = preco_oficial = None
+
     seletor = produto.get("seletor_estoque")
     if seletor:
         elemento = sopa.select_one(seletor)
@@ -474,8 +635,18 @@ def checar_html(produto, timeout=15):
                 em_estoque = False
                 detalhe = f"sem botao de compra e achei '{achou}' na pagina (busca ampla)"
             else:
-                em_estoque = None
-                detalhe = "nao deu pra concluir — sem botao de compra e sem sinal de esgotado"
+                # Sem resposta: aqui a gente diz POR QUE, em vez de deixar
+                # o produto mudo no painel.
+                if _pagina_e_casca_js(sopa):
+                    em_estoque = None
+                    detalhe = ("a loja monta a pagina por JavaScript — o conteudo nao "
+                               "vem no HTML. Use o link da API/vitrine ou um seletor manual")
+                elif len(sopa.get_text(" ", strip=True)) < 400:
+                    em_estoque = None
+                    detalhe = "a loja devolveu uma pagina quase vazia (possivel bloqueio ao servidor)"
+                else:
+                    em_estoque = None
+                    detalhe = "pagina lida, mas sem preco, botao de compra nem aviso de esgotado"
 
     # Seletor manual de preco, quando configurado, tem prioridade sobre o automatico
     if produto.get("seletor_preco"):
@@ -1418,6 +1589,34 @@ def diagnostico():
     pra diferenciar 'o app nao esta checando' de 'a loja nao esta respondendo'.
     """
     relatorios = []
+
+    # --- Bloco 1: POR QUE cada produto esta sem resposta ---
+    # Este e o bloco que responde "muitos estao sem resposta": em vez de so
+    # dizer que falhou, mostra o motivo que a ultima checagem registrou.
+    dados = ler_dados()
+    mudos = []
+    for produto in dados["produtos"]:
+        estado = dados["estado"].get(produto["id"], {})
+        if estado.get("em_estoque") is not None:
+            continue
+        motivo = estado.get("erro") or estado.get("detalhe") or "ainda nao foi checado"
+        mudos.append(f"{produto.get('nome', '?')[:45]} [{produto.get('metodo', 'html')}] → {motivo}")
+    relatorios.append({
+        "nome": f"Produtos sem resposta ({len(mudos)} de {len(dados['produtos'])})",
+        "linhas": mudos or ["nenhum — todos os produtos responderam na ultima checagem"],
+    })
+
+    # --- Bloco 2: lojas em castigo (silencio temporario apos recusa) ---
+    agora = time.time()
+    em_castigo = [f"{dominio} → em silencio por mais {int((ate - agora) // 60) + 1} min "
+                  f"({_recusas.get(dominio, 0)} recusa(s) seguida(s))"
+                  for dominio, ate in _castigo_ate.items() if ate > agora]
+    relatorios.append({
+        "nome": "Lojas em castigo agora",
+        "linhas": em_castigo or ["nenhuma — todas as lojas estao sendo consultadas normalmente"],
+    })
+
+    # --- Bloco 3: teste ao vivo de cada loja (o que ja existia) ---
     for loja_id, loja in LOJAS_VARREDURA.items():
         linhas = []
         paginas = loja.get("pagina_fixa")
