@@ -34,8 +34,166 @@ from jinja2 import DictLoader
 # logo abaixo desta secao; nao precisa mexer aqui)
 # ============================================================================
 
-TEMPLATES = {'base.html': '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n  <title>{% block titulo %}Monitor TCG{% endblock %}</title>\n\n  <!-- identidade de app no celular (iPhone e Android) -->\n  <meta name="theme-color" content="#14231f">\n  <link rel="manifest" href="/manifest.json">\n  <link rel="apple-touch-icon" href="/icone.png">\n  <meta name="apple-mobile-web-app-capable" content="yes">\n  <meta name="mobile-web-app-capable" content="yes">\n  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">\n  <meta name="apple-mobile-web-app-title" content="Monitor TCG">\n\n  <link rel="preconnect" href="https://fonts.googleapis.com">\n  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n  <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Archivo:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">\n  <link rel="stylesheet" href="/estilo.css">\n</head>\n<body>\n\n  <header class="topo">\n    <div class="topo-interno">\n      <a class="marca" href="{{ url_for(\'painel\') }}">\n        <span class="marca-nome">Monitor TCG</span>\n        <span class="marca-sub">estoque e preço, de olho por você</span>\n      </a>\n\n      <nav class="menu">\n        <a href="{{ url_for(\'painel\') }}" {% if request.endpoint == \'painel\' %}class="ativo"{% endif %}>Painel</a>\n        <a href="{{ url_for(\'novo_produto\') }}" {% if request.endpoint == \'novo_produto\' %}class="ativo"{% endif %}>Adicionar</a>\n        <a href="{{ url_for(\'varredura\') }}" {% if request.endpoint == \'varredura\' %}class="ativo"{% endif %}>Varredura</a>\n        <a href="{{ url_for(\'ajustes\') }}" {% if request.endpoint == \'ajustes\' %}class="ativo"{% endif %}>Ajustes</a>\n        <a href="{{ url_for(\'sair\') }}" class="menu-sair">{{ session.nome }} · sair</a>\n      </nav>\n    </div>\n  </header>\n\n  <main class="conteudo">\n    {% with mensagens = get_flashed_messages(with_categories=true) %}\n      {% if mensagens %}\n        {% for categoria, texto in mensagens %}\n          <p class="recado recado-{{ categoria }}">{{ texto }}</p>\n        {% endfor %}\n      {% endif %}\n    {% endwith %}\n\n    <div id="banner-som" class="banner-som">\n      <span>🔊 Ativar aviso sonoro nesta aba quando algo mudar?</span>\n      <button id="botao-ativar-som" type="button" class="botao-secundario">Ativar som</button>\n    </div>\n\n    {% block conteudo %}{% endblock %}\n  </main>\n\n  <footer class="rodape">\n    <span>Monitor TCG · acesso restrito · {{ versao }}</span>\n  </footer>\n\n  <script>\n    // Registra a peça que permite "Adicionar à Tela de Início" no celular.\n    if ("serviceWorker" in navigator) {\n      navigator.serviceWorker.register("/sw.js");\n    }\n  </script>\n\n  <script>\n(function () {\n  var CHAVE_SOM = "monitorTcgSomAtivado";\n  var audioCtx = null;\n  var ultimoVisto = null;\n  var primeiraChecagem = true;  // separa "ainda nao chequei" de "historico vazio"\n  var somAtivado = localStorage.getItem(CHAVE_SOM) === "sim";\n\n  function apitar() {\n    try {\n      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n      if (audioCtx.state === "suspended") audioCtx.resume();\n      var osc = audioCtx.createOscillator();\n      var gain = audioCtx.createGain();\n      osc.connect(gain);\n      gain.connect(audioCtx.destination);\n      osc.frequency.value = 880;\n      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);\n      gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.02);\n      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.55);\n      osc.start();\n      osc.stop(audioCtx.currentTime + 0.55);\n    } catch (e) { /* navegador sem suporte a audio - ignora */ }\n  }\n\n  function ativarSom() {\n    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n    if (audioCtx.state === "suspended") audioCtx.resume();\n    somAtivado = true;\n    localStorage.setItem(CHAVE_SOM, "sim");\n    apitar();\n    var banner = document.getElementById("banner-som");\n    if (banner) banner.style.display = "none";\n  }\n\n  function mostrarAvisoNovidade() {\n    var conteudo = document.querySelector(".conteudo");\n    if (!conteudo || document.getElementById("aviso-novidade")) return;\n    var p = document.createElement("p");\n    p.id = "aviso-novidade";\n    p.className = "recado";\n    p.innerHTML = \'🔔 Uma loja mudou. <a href="\' + window.location.pathname + \'">Atualizar a página</a>\';\n    conteudo.prepend(p);\n  }\n\n  async function verificarNovidades() {\n    try {\n      var resp = await fetch("/api/estado");\n      if (!resp.ok) return;\n      var dados = await resp.json();\n      var recente = dados.historico && dados.historico[0] ? dados.historico[0].quando : null;\n      if (primeiraChecagem) {\n        primeiraChecagem = false;\n        ultimoVisto = recente;\n        return;\n      }\n      if (recente && recente !== ultimoVisto) {\n        ultimoVisto = recente;\n        if (somAtivado) apitar();\n        document.title = "🔔 Novidade! · Monitor TCG";\n        mostrarAvisoNovidade();\n      }\n    } catch (e) { /* tenta de novo na proxima */ }\n  }\n\n  document.addEventListener("DOMContentLoaded", function () {\n    var botao = document.getElementById("botao-ativar-som");\n    if (botao) botao.addEventListener("click", ativarSom);\n    var banner = document.getElementById("banner-som");\n    if (banner && !somAtivado) banner.style.display = "flex";\n    verificarNovidades();\n    setInterval(verificarNovidades, 20000);\n  });\n})();\n  </script>\n\n</body>\n</html>\n', 'painel.html': '{% extends "base.html" %}\n{% block titulo %}Painel — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <section class="barra-resumo">\n    <div class="contagens">\n      <span class="contagem contagem-ok">{{ resumo.disponiveis }} à venda</span>\n      <span class="contagem">{{ resumo.esgotados }} esgotados</span>\n      {% if resumo.com_erro %}<span class="contagem contagem-erro">{{ resumo.com_erro }} sem resposta</span>{% endif %}\n    </div>\n\n    <form method="post" action="{{ url_for(\'checar_agora\') }}">\n      <button class="botao-principal" type="submit">Checar agora</button>\n    </form>\n  </section>\n\n  <p class="nota-intervalo">\n    Checagem automática a cada {{ config.intervalo_minutos }} minutos enquanto esta janela estiver aberta.\n    A vitrine abaixo mostra só quem está disponível agora — o resto fica na lista\n    recolhida, mas continua sendo monitorado normalmente.\n  </p>\n\n  {% if resumo.total == 0 %}\n    <div class="vazio">\n      <h2>Nenhum produto na mira ainda</h2>\n      <p>Cole o link de um produto e o app passa a vigiar o estoque e o preço dele.</p>\n      <a class="botao-principal" href="{{ url_for(\'novo_produto\') }}">Adicionar o primeiro</a>\n    </div>\n  {% elif not disponiveis %}\n    <div class="vazio">\n      <h2>Nada disponível agora</h2>\n      <p>Você está monitorando {{ resumo.total }} produto(s) — assim que algum voltar\n      ao estoque, o card aparece aqui e o aviso sai pelos seus canais.</p>\n    </div>\n  {% endif %}\n\n  {% if disponiveis %}\n    <div class="fichario">\n      {% for produto in disponiveis %}\n        {% set s = produto.situacao %}\n        <article class="carta carta-disponivel">\n\n          <div class="carta-topo">\n            <h2 class="carta-nome">{{ produto.nome }}</h2>\n            <span class="carta-loja">{{ produto.loja }}</span>\n          </div>\n\n          <div class="carta-corpo">\n            <span class="selo selo-disponivel">Disponível</span>\n\n            <p class="carta-preco">{{ s.preco | reais }}</p>\n\n            {% if s.detalhe %}<p class="carta-detalhe">{{ s.detalhe }}</p>{% endif %}\n          </div>\n\n          <div class="carta-rodape">\n            <span class="carimbo">{{ s.checado_em | hora }}</span>\n            <span class="carta-acoes">\n              <a href="{{ produto.url }}" target="_blank" rel="noopener">abrir loja</a>\n              <a href="{{ url_for(\'editar_produto\', produto_id=produto.id) }}">editar</a>\n              <form method="post" action="{{ url_for(\'remover_produto\', produto_id=produto.id) }}"\n                    onsubmit="return confirm(\'Tirar {{ produto.nome }} da lista?\')">\n                <button type="submit" class="link-botao">remover</button>\n              </form>\n            </span>\n          </div>\n        </article>\n      {% endfor %}\n    </div>\n  {% endif %}\n\n  {% if outros %}\n    <details class="outros-produtos">\n      <summary>Outros produtos monitorados ({{ outros | length }})</summary>\n      <ul class="lista-outros">\n        {% for produto in outros %}\n          {% set s = produto.situacao %}\n          <li>\n            <span class="selo\n              {% if s.em_estoque is sameas false %}selo-esgotado\n              {% elif s %}selo-erro\n              {% else %}selo-novo{% endif %}">\n              {% if s.em_estoque is sameas false %}Esgotado\n              {% elif s %}Sem resposta\n              {% else %}Ainda não checado{% endif %}\n            </span>\n            <span class="item-nome">{{ produto.nome }}</span>\n            <span class="item-meta">{{ produto.loja }}{% if s.detalhe %} · {{ s.detalhe }}{% endif %}</span>\n            <span class="carta-acoes">\n              <a href="{{ produto.url }}" target="_blank" rel="noopener">abrir loja</a>\n              <a href="{{ url_for(\'editar_produto\', produto_id=produto.id) }}">editar</a>\n              <form method="post" action="{{ url_for(\'remover_produto\', produto_id=produto.id) }}"\n                    onsubmit="return confirm(\'Tirar {{ produto.nome }} da lista?\')">\n                <button type="submit" class="link-botao">remover</button>\n              </form>\n            </span>\n          </li>\n        {% endfor %}\n      </ul>\n    </details>\n  {% endif %}\n\n  {% if historico %}\n    <section class="historico">\n      <h2>Últimos avisos</h2>\n      <ul>\n        {% for item in historico %}\n          <li>\n            <span class="carimbo">{{ item.quando | hora }}</span>\n            <span><strong>{{ item.nome }}</strong> — {{ item.resumo }}</span>\n          </li>\n        {% endfor %}\n      </ul>\n    </section>\n  {% endif %}\n\n{% endblock %}\n', 'produto.html': '{% extends "base.html" %}\n{% block titulo %}{{ "Editar produto" if produto else "Adicionar produto" }} — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">{{ "Editar produto" if produto else "Adicionar produto" }}</h1>\n    <p class="subtitulo-tela">\n      Cole o link da página do produto. Os campos avançados já vêm preenchidos\n      sozinhos — mexa neles só se a checagem não funcionar.\n    </p>\n\n    <form method="post" class="formulario">\n\n      <label>\n        <span class="rotulo">Link do produto</span>\n        <input type="url" name="url" required placeholder="https://..."\n               value="{{ produto.url if produto else \'\' }}">\n        <span class="ajuda">A página do produto em si, não a home da loja.</span>\n      </label>\n\n      <label>\n        <span class="rotulo">Como você quer chamar</span>\n        <input type="text" name="nome" required placeholder="Ex.: Booster Box Escuridão Absoluta"\n               value="{{ produto.nome if produto else \'\' }}">\n      </label>\n\n      <label>\n        <span class="rotulo">Loja</span>\n        <input type="text" name="loja" placeholder="preenchido pelo link"\n               value="{{ produto.loja if produto else \'\' }}">\n      </label>\n\n      <details class="avancado" {% if produto %}open{% endif %}>\n        <summary>Ajuste fino (opcional)</summary>\n\n        <label>\n          <span class="rotulo">Método de checagem</span>\n          <select name="metodo">\n            <option value="html" {% if produto and produto.metodo == \'html\' %}selected{% endif %}>\n              Ler a página (serve para a maioria)\n            </option>\n            <option value="vtex" {% if produto and produto.metodo == \'vtex\' %}selected{% endif %}>\n              API VTEX (Copag B2B)\n            </option>\n            <option value="woocommerce" {% if produto and produto.metodo == \'woocommerce\' %}selected{% endif %}>\n              API WooCommerce (Super TCG)\n            </option>\n          </select>\n          <span class="ajuda">Deixe em branco no cadastro novo que o app escolhe pelo link.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Termo de busca</span>\n          <input type="text" name="termo_busca" placeholder="usado nos métodos de API"\n                 value="{{ produto.termo_busca if produto else \'\' }}">\n          <span class="ajuda">Se a API não achar o produto, tente um trecho mais curto do nome.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Trecho do preço na página</span>\n          <input type="text" name="seletor_preco" placeholder="ex.: .preco-produto"\n                 value="{{ produto.seletor_preco if produto else \'\' }}">\n          <span class="ajuda">\n            Só para o método "ler a página", quando você quiser acompanhar o preço:\n            clique com o botão direito no preço do site → Inspecionar → copie a classe.\n          </span>\n        </label>\n      </details>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">\n          {{ "Salvar alterações" if produto else "Adicionar à lista" }}\n        </button>\n        <a class="botao-secundario" href="{{ url_for(\'painel\') }}">Cancelar</a>\n      </div>\n    </form>\n  </div>\n\n{% endblock %}\n', 'ajustes.html': '{% extends "base.html" %}\n{% block titulo %}Ajustes — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Ajustes</h1>\n    <p class="subtitulo-tela">\n      Com que frequência checar e para onde mandar os avisos.\n    </p>\n\n    <form method="post" class="formulario">\n\n      <fieldset>\n        <legend>Ritmo</legend>\n\n        <label>\n          <span class="rotulo">Checar a cada quantos minutos</span>\n          <input type="number" name="intervalo_minutos" min="1" value="{{ config.intervalo_minutos }}">\n          <span class="ajuda">Abaixo de 10 minutos algumas lojas podem começar a recusar as consultas.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Desistir de uma loja depois de quantos segundos</span>\n          <input type="number" name="timeout_segundos" min="5" value="{{ config.timeout_segundos }}">\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Varredura automática</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="varredura_ativa" value="sim"\n                 {% if config.varredura_auto.ativa %}checked{% endif %}>\n          <span>Varrer as lojas sozinho e adicionar produtos TCG novos ao painel</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Varrer a cada quantos minutos</span>\n          <input type="number" name="varredura_intervalo" min="5"\n                 value="{{ config.varredura_auto.intervalo_minutos }}">\n          <span class="ajuda">Mínimo 5. A cada rodada entram no máximo 30 produtos\n          novos; o resto fica pras rodadas seguintes. Intervalos muito curtos fazem\n          dezenas de buscas por rodada nas lojas — se alguma começar a recusar,\n          aumente aqui.</span>\n        </label>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="varredura_incluir_esgotados" value="sim"\n                 {% if config.varredura_auto.incluir_esgotados %}checked{% endif %}>\n          <span>Incluir esgotados na varredura automática</span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Discord</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="discord_ativo" value="sim"\n                 {% if config.avisos.discord_ativo %}checked{% endif %}>\n          <span>Mandar avisos no Discord</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Link do webhook</span>\n          <input type="text" name="discord_webhook" placeholder="https://discord.com/api/webhooks/..."\n                 value="{{ config.avisos.discord_webhook }}">\n          <span class="ajuda">\n            No Discord: botão direito no canal → Editar Canal → Integrações → Webhooks →\n            Novo Webhook → Copiar URL.\n          </span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Telegram</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="telegram_ativo" value="sim"\n                 {% if config.avisos.telegram_ativo %}checked{% endif %}>\n          <span>Mandar avisos no Telegram</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Token do bot</span>\n          <input type="text" name="telegram_token" value="{{ config.avisos.telegram_token }}">\n          <span class="ajuda">Crie o bot conversando com o @BotFather no Telegram.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Seu chat ID</span>\n          <input type="text" name="telegram_chat_id" value="{{ config.avisos.telegram_chat_id }}">\n          <span class="ajuda">Descubra o seu conversando com o @userinfobot.</span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Email</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="email_ativo" value="sim"\n                 {% if config.avisos.email_ativo %}checked{% endif %}>\n          <span>Mandar avisos por email</span>\n        </label>\n\n        <div class="dupla">\n          <label>\n            <span class="rotulo">Servidor</span>\n            <input type="text" name="email_servidor" value="{{ config.avisos.email_servidor }}">\n          </label>\n          <label>\n            <span class="rotulo">Porta</span>\n            <input type="text" name="email_porta" value="{{ config.avisos.email_porta }}">\n          </label>\n        </div>\n\n        <label>\n          <span class="rotulo">Sua conta</span>\n          <input type="text" name="email_usuario" value="{{ config.avisos.email_usuario }}">\n        </label>\n\n        <label>\n          <span class="rotulo">Senha</span>\n          <input type="password" name="email_senha" value="{{ config.avisos.email_senha }}">\n          <span class="ajuda">No Gmail, gere uma "senha de app" — a senha normal da conta não funciona.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Mandar para</span>\n          <input type="text" name="email_destino" value="{{ config.avisos.email_destino }}">\n        </label>\n      </fieldset>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">Salvar ajustes</button>\n      </div>\n    </form>\n\n    <form method="post" action="{{ url_for(\'testar_avisos\') }}" class="teste">\n      <button class="botao-secundario" type="submit">Enviar mensagem de teste</button>\n      <span class="ajuda">Salve os ajustes antes de testar.</span>\n    </form>\n\n    <p class="linha-diagnostico">\n      Algo parece não estar checando direito?\n      <a href="{{ url_for(\'diagnostico\') }}">Rodar diagnóstico das lojas</a> —\n      mostra o que o servidor está conseguindo ler de cada uma agora (demora\n      alguns segundos pra abrir).\n    </p>\n\n    <p class="alerta-privacidade">\n      Esses dados ficam guardados no servidor da hospedagem, não no seu celular.\n      Cada pessoa entra com a própria senha (variável <code>ACESSOS</code> no\n      Render) — pra tirar o acesso de alguém, remova só a senha dela ali, sem\n      mexer na de mais ninguém.\n    </p>\n  </div>\n\n{% endblock %}\n', 'entrar.html': '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Entrar — Monitor TCG</title>\n  <link rel="apple-touch-icon" href="/icone.png">\n  <link rel="stylesheet" href="/estilo.css">\n</head>\n<body class="corpo-login">\n  <div class="tela-login">\n    <form method="post" class="cartao-login">\n      <img src="/icone.png" alt="" class="login-icone">\n      <h1 class="login-titulo">Monitor TCG</h1>\n      <p class="login-subtitulo">Acesso restrito — só quem tem senha entra.</p>\n      {% if erro %}<p class="recado recado-erro">{{ erro }}</p>{% endif %}\n      <input type="hidden" name="proximo" value="{{ proximo }}">\n      <label>\n        <span class="rotulo">Senha</span>\n        <input type="password" name="senha" autofocus required>\n      </label>\n      <button class="botao-principal" type="submit">Entrar</button>\n    </form>\n  </div>\n</body>\n</html>\n', 'varredura.html': '{% extends "base.html" %}\n{% block titulo %}Varredura — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Varredura</h1>\n    <p class="subtitulo-tela">\n      O app pesquisa a loja inteira pelas franquias marcadas, filtra o que é\n      produto de TCG (booster, box, deck, blister, lata, kit, pré-release...)\n      e te deixa adicionar tudo de uma vez.\n    </p>\n\n    <form method="post" class="formulario">\n      <label>\n        <span class="rotulo">Loja</span>\n        <select name="loja" required>\n          {% for id, loja in lojas.items() %}\n            <option value="{{ id }}" {% if id == loja_escolhida %}selected{% endif %}>{{ loja.nome }}</option>\n          {% endfor %}\n        </select>\n      </label>\n\n      <span class="rotulo">Franquias</span>\n      <div class="grade-franquias">\n        {% for f in franquias %}\n          <label class="linha-checkbox">\n            <input type="checkbox" name="franquias" value="{{ f }}"\n                   {% if f in franquias_escolhidas %}checked{% endif %}>\n            <span>{{ f }}</span>\n          </label>\n        {% endfor %}\n      </div>\n\n      <label class="linha-checkbox">\n        <input type="checkbox" name="incluir_esgotados" value="sim"\n               {% if incluir_esgotados %}checked{% endif %}>\n        <span>Incluir produtos esgotados\n          <span class="ajuda">Esgotados são justamente os que avisam quando voltarem —\n          vale incluir os que você quer garantir na reposição.</span>\n        </span>\n      </label>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">Varrer loja</button>\n      </div>\n    </form>\n  </div>\n\n  {% if resultados is not none %}\n    <section class="resultado-varredura">\n      <h2 class="titulo-resultado">{{ resultados | length }} produto(s) encontrados</h2>\n\n      {% if avisos %}\n        <p class="nota-intervalo">{{ avisos | join(" · ") }}</p>\n      {% endif %}\n\n      {% if resultados %}\n        <form method="post" action="{{ url_for(\'varredura_adicionar\') }}">\n          <input type="hidden" name="loja" value="{{ loja_escolhida }}">\n\n          <ul class="lista-varredura">\n            {% for item in resultados %}\n              <li>\n                <label class="linha-checkbox">\n                  <input type="checkbox" name="sel" value="{{ item.json }}"\n                         {% if item.ja_monitorado %}disabled{% else %}checked{% endif %}>\n                  <span class="item-varredura">\n                    <span class="item-nome">{{ item.nome }}</span>\n                    <span class="item-meta">\n                      {{ item.franquia }}\n                      {% if item.preco is not none %} · {{ item.preco | reais }}{% endif %}\n                      {% if item.em_estoque is sameas true %} · disponível\n                      {% elif item.em_estoque is sameas false %} · esgotado{% endif %}\n                      {% if item.ja_monitorado %} · <strong>já monitorado</strong>{% endif %}\n                    </span>\n                  </span>\n                </label>\n              </li>\n            {% endfor %}\n          </ul>\n\n          <div class="acoes-form">\n            <button class="botao-principal" type="submit">Adicionar marcados ao painel</button>\n          </div>\n        </form>\n      {% endif %}\n    </section>\n  {% endif %}\n\n{% endblock %}\n', 'diagnostico.html': '{% extends "base.html" %}\n{% block titulo %}Diagnóstico — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Diagnóstico das lojas</h1>\n    <p class="subtitulo-tela">\n      O que o servidor conseguiu ler de cada loja <strong>agora</strong>, ao\n      abrir esta tela. "0 produtos" numa página significa que ela carrega via\n      JavaScript ou mudou de layout; "FALHOU" significa que a loja recusou ou\n      não respondeu a tempo.\n    </p>\n\n    {% for r in relatorios %}\n      <section class="bloco-diagnostico">\n        <h2>{{ r.nome }}</h2>\n        <ul>\n          {% for linha in r.linhas %}\n            <li>{{ linha }}</li>\n          {% endfor %}\n        </ul>\n      </section>\n    {% endfor %}\n\n    <a class="botao-secundario" href="{{ url_for(\'ajustes\') }}">Voltar aos ajustes</a>\n  </div>\n\n{% endblock %}\n'}
+TEMPLATES = {'base.html': '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">\n  <title>{% block titulo %}Monitor TCG{% endblock %}</title>\n\n  <!-- identidade de app no celular (iPhone e Android) -->\n  <meta name="theme-color" content="#14231f">\n  <link rel="manifest" href="/manifest.json">\n  <link rel="apple-touch-icon" href="/icone.png">\n  <meta name="apple-mobile-web-app-capable" content="yes">\n  <meta name="mobile-web-app-capable" content="yes">\n  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">\n  <meta name="apple-mobile-web-app-title" content="Monitor TCG">\n\n  <link rel="preconnect" href="https://fonts.googleapis.com">\n  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>\n  <link href="https://fonts.googleapis.com/css2?family=Antonio:wght@400;600;700&family=Archivo:wght@400;500;600&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">\n  <link rel="stylesheet" href="/estilo.css">\n</head>\n<body>\n\n  <header class="topo">\n    <div class="topo-interno">\n      <a class="marca" href="{{ url_for(\'painel\') }}">\n        <span class="marca-nome">Monitor TCG</span>\n        <span class="marca-sub">estoque e preço, de olho por você</span>\n      </a>\n\n      <nav class="menu">\n        <a href="{{ url_for(\'painel\') }}" {% if request.endpoint == \'painel\' %}class="ativo"{% endif %}>Painel</a>\n        <a href="{{ url_for(\'novo_produto\') }}" {% if request.endpoint == \'novo_produto\' %}class="ativo"{% endif %}>Adicionar</a>\n        <a href="{{ url_for(\'varredura\') }}" {% if request.endpoint == \'varredura\' %}class="ativo"{% endif %}>Varredura</a>\n        <a href="{{ url_for(\'mercado\') }}" {% if request.endpoint == \'mercado\' %}class="ativo"{% endif %}>Mercado</a>\n        <a href="{{ url_for(\'ajustes\') }}" {% if request.endpoint == \'ajustes\' %}class="ativo"{% endif %}>Ajustes</a>\n        <a href="{{ url_for(\'sair\') }}" class="menu-sair">{{ session.nome }} · sair</a>\n      </nav>\n    </div>\n  </header>\n\n  <main class="conteudo">\n    {% with mensagens = get_flashed_messages(with_categories=true) %}\n      {% if mensagens %}\n        {% for categoria, texto in mensagens %}\n          <p class="recado recado-{{ categoria }}">{{ texto }}</p>\n        {% endfor %}\n      {% endif %}\n    {% endwith %}\n\n    <div id="banner-som" class="banner-som">\n      <span>🔊 Ativar aviso sonoro nesta aba quando algo mudar?</span>\n      <button id="botao-ativar-som" type="button" class="botao-secundario">Ativar som</button>\n    </div>\n\n    {% block conteudo %}{% endblock %}\n  </main>\n\n  <footer class="rodape">\n    <span>Monitor TCG · acesso restrito · {{ versao }}</span>\n  </footer>\n\n  <script>\n    // Registra a peça que permite "Adicionar à Tela de Início" no celular.\n    if ("serviceWorker" in navigator) {\n      navigator.serviceWorker.register("/sw.js");\n    }\n  </script>\n\n  <script>\n(function () {\n  var CHAVE_SOM = "monitorTcgSomAtivado";\n  var audioCtx = null;\n  var ultimoVisto = null;\n  var primeiraChecagem = true;  // separa "ainda nao chequei" de "historico vazio"\n  var somAtivado = localStorage.getItem(CHAVE_SOM) === "sim";\n\n  function apitar() {\n    try {\n      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n      if (audioCtx.state === "suspended") audioCtx.resume();\n      var osc = audioCtx.createOscillator();\n      var gain = audioCtx.createGain();\n      osc.connect(gain);\n      gain.connect(audioCtx.destination);\n      osc.frequency.value = 880;\n      gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);\n      gain.gain.exponentialRampToValueAtTime(0.3, audioCtx.currentTime + 0.02);\n      gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.55);\n      osc.start();\n      osc.stop(audioCtx.currentTime + 0.55);\n    } catch (e) { /* navegador sem suporte a audio - ignora */ }\n  }\n\n  function ativarSom() {\n    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();\n    if (audioCtx.state === "suspended") audioCtx.resume();\n    somAtivado = true;\n    localStorage.setItem(CHAVE_SOM, "sim");\n    apitar();\n    var banner = document.getElementById("banner-som");\n    if (banner) banner.style.display = "none";\n  }\n\n  function mostrarAvisoNovidade() {\n    var conteudo = document.querySelector(".conteudo");\n    if (!conteudo || document.getElementById("aviso-novidade")) return;\n    var p = document.createElement("p");\n    p.id = "aviso-novidade";\n    p.className = "recado";\n    p.innerHTML = \'🔔 Uma loja mudou. <a href="\' + window.location.pathname + \'">Atualizar a página</a>\';\n    conteudo.prepend(p);\n  }\n\n  async function verificarNovidades() {\n    try {\n      var resp = await fetch("/api/estado");\n      if (!resp.ok) return;\n      var dados = await resp.json();\n      var recente = dados.historico && dados.historico[0] ? dados.historico[0].quando : null;\n      if (primeiraChecagem) {\n        primeiraChecagem = false;\n        ultimoVisto = recente;\n        return;\n      }\n      if (recente && recente !== ultimoVisto) {\n        ultimoVisto = recente;\n        if (somAtivado) apitar();\n        document.title = "🔔 Novidade! · Monitor TCG";\n        mostrarAvisoNovidade();\n      }\n    } catch (e) { /* tenta de novo na proxima */ }\n  }\n\n  document.addEventListener("DOMContentLoaded", function () {\n    var botao = document.getElementById("botao-ativar-som");\n    if (botao) botao.addEventListener("click", ativarSom);\n    var banner = document.getElementById("banner-som");\n    if (banner && !somAtivado) banner.style.display = "flex";\n    verificarNovidades();\n    setInterval(verificarNovidades, 20000);\n  });\n})();\n  </script>\n\n</body>\n</html>\n', 'painel.html': '{% extends "base.html" %}\n{% block titulo %}Painel — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <section class="barra-resumo">\n    <div class="contagens">\n      <span class="contagem contagem-ok">{{ resumo.disponiveis }} à venda</span>\n      <span class="contagem">{{ resumo.esgotados }} esgotados</span>\n      {% if resumo.com_erro %}<span class="contagem contagem-erro">{{ resumo.com_erro }} sem resposta</span>{% endif %}\n    </div>\n\n    <form method="post" action="{{ url_for(\'checar_agora\') }}">\n      <button class="botao-principal" type="submit">Checar agora</button>\n    </form>\n  </section>\n\n  <p class="nota-intervalo">\n    Checagem automática a cada {{ config.intervalo_minutos }} minutos enquanto esta janela estiver aberta.\n    A vitrine abaixo mostra só quem está disponível agora — o resto fica na lista\n    recolhida, mas continua sendo monitorado normalmente.\n  </p>\n\n  {% if resumo.total == 0 %}\n    <div class="vazio">\n      <h2>Nenhum produto na mira ainda</h2>\n      <p>Cole o link de um produto e o app passa a vigiar o estoque e o preço dele.</p>\n      <a class="botao-principal" href="{{ url_for(\'novo_produto\') }}">Adicionar o primeiro</a>\n    </div>\n  {% elif not disponiveis %}\n    <div class="vazio">\n      <h2>Nada disponível agora</h2>\n      <p>Você está monitorando {{ resumo.total }} produto(s) — assim que algum voltar\n      ao estoque, o card aparece aqui e o aviso sai pelos seus canais.</p>\n    </div>\n  {% endif %}\n\n  {% if disponiveis %}\n    <div class="fichario">\n      {% for produto in disponiveis %}\n        {% set s = produto.situacao %}\n        <article class="carta carta-disponivel">\n\n          <div class="carta-topo">\n            <h2 class="carta-nome">{{ produto.nome }}</h2>\n            <span class="carta-loja">{{ produto.loja }}</span>\n          </div>\n\n          <div class="carta-corpo">\n            <span class="selo selo-disponivel">Disponível</span>\n\n            <p class="carta-preco">{{ s.preco | reais }}</p>\n\n            {% if s.detalhe %}<p class="carta-detalhe">{{ s.detalhe }}</p>{% endif %}\n          </div>\n\n          <div class="carta-rodape">\n            <span class="carimbo">{{ s.checado_em | hora }}</span>\n            <span class="carta-acoes">\n              <a href="{{ produto.url }}" target="_blank" rel="noopener">abrir loja</a>\n              <a href="{{ url_for(\'editar_produto\', produto_id=produto.id) }}">editar</a>\n              <form method="post" action="{{ url_for(\'remover_produto\', produto_id=produto.id) }}"\n                    onsubmit="return confirm(\'Tirar {{ produto.nome }} da lista?\')">\n                <button type="submit" class="link-botao">remover</button>\n              </form>\n            </span>\n          </div>\n        </article>\n      {% endfor %}\n    </div>\n  {% endif %}\n\n  {% if outros %}\n    <details class="outros-produtos">\n      <summary>Outros produtos monitorados ({{ outros | length }})</summary>\n      <ul class="lista-outros">\n        {% for produto in outros %}\n          {% set s = produto.situacao %}\n          <li>\n            <span class="selo\n              {% if s.em_estoque is sameas false %}selo-esgotado\n              {% elif s %}selo-erro\n              {% else %}selo-novo{% endif %}">\n              {% if s.em_estoque is sameas false %}Esgotado\n              {% elif s %}Sem resposta\n              {% else %}Ainda não checado{% endif %}\n            </span>\n            <span class="item-nome">{{ produto.nome }}</span>\n            <span class="item-meta">{{ produto.loja }}{% if s.detalhe %} · {{ s.detalhe }}{% endif %}</span>\n            <span class="carta-acoes">\n              <a href="{{ produto.url }}" target="_blank" rel="noopener">abrir loja</a>\n              <a href="{{ url_for(\'editar_produto\', produto_id=produto.id) }}">editar</a>\n              <form method="post" action="{{ url_for(\'remover_produto\', produto_id=produto.id) }}"\n                    onsubmit="return confirm(\'Tirar {{ produto.nome }} da lista?\')">\n                <button type="submit" class="link-botao">remover</button>\n              </form>\n            </span>\n          </li>\n        {% endfor %}\n      </ul>\n    </details>\n  {% endif %}\n\n  {% if historico %}\n    <section class="historico">\n      <h2>Últimos avisos</h2>\n      <ul>\n        {% for item in historico %}\n          <li>\n            <span class="carimbo">{{ item.quando | hora }}</span>\n            <span><strong>{{ item.nome }}</strong> — {{ item.resumo }}</span>\n          </li>\n        {% endfor %}\n      </ul>\n    </section>\n  {% endif %}\n\n{% endblock %}\n', 'produto.html': '{% extends "base.html" %}\n{% block titulo %}{{ "Editar produto" if produto else "Adicionar produto" }} — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">{{ "Editar produto" if produto else "Adicionar produto" }}</h1>\n    <p class="subtitulo-tela">\n      Cole o link da página do produto. Os campos avançados já vêm preenchidos\n      sozinhos — mexa neles só se a checagem não funcionar.\n    </p>\n\n    <form method="post" class="formulario">\n\n      <label>\n        <span class="rotulo">Link do produto</span>\n        <input type="url" name="url" required placeholder="https://..."\n               value="{{ produto.url if produto else \'\' }}">\n        <span class="ajuda">A página do produto em si, não a home da loja.</span>\n      </label>\n\n      <label>\n        <span class="rotulo">Como você quer chamar</span>\n        <input type="text" name="nome" required placeholder="Ex.: Booster Box Escuridão Absoluta"\n               value="{{ produto.nome if produto else \'\' }}">\n      </label>\n\n      <label>\n        <span class="rotulo">Loja</span>\n        <input type="text" name="loja" placeholder="preenchido pelo link"\n               value="{{ produto.loja if produto else \'\' }}">\n      </label>\n\n      <details class="avancado" {% if produto %}open{% endif %}>\n        <summary>Ajuste fino (opcional)</summary>\n\n        <label>\n          <span class="rotulo">Método de checagem</span>\n          <select name="metodo">\n            <option value="html" {% if produto and produto.metodo == \'html\' %}selected{% endif %}>\n              Ler a página (serve para a maioria)\n            </option>\n            <option value="vtex" {% if produto and produto.metodo == \'vtex\' %}selected{% endif %}>\n              API VTEX (Copag B2B)\n            </option>\n            <option value="woocommerce" {% if produto and produto.metodo == \'woocommerce\' %}selected{% endif %}>\n              API WooCommerce (Super TCG)\n            </option>\n          </select>\n          <span class="ajuda">Deixe em branco no cadastro novo que o app escolhe pelo link.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Termo de busca</span>\n          <input type="text" name="termo_busca" placeholder="usado nos métodos de API"\n                 value="{{ produto.termo_busca if produto else \'\' }}">\n          <span class="ajuda">Se a API não achar o produto, tente um trecho mais curto do nome.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Trecho do preço na página</span>\n          <input type="text" name="seletor_preco" placeholder="ex.: .preco-produto"\n                 value="{{ produto.seletor_preco if produto else \'\' }}">\n          <span class="ajuda">\n            Só para o método "ler a página", quando você quiser acompanhar o preço:\n            clique com o botão direito no preço do site → Inspecionar → copie a classe.\n          </span>\n        </label>\n      </details>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">\n          {{ "Salvar alterações" if produto else "Adicionar à lista" }}\n        </button>\n        <a class="botao-secundario" href="{{ url_for(\'painel\') }}">Cancelar</a>\n      </div>\n    </form>\n  </div>\n\n{% endblock %}\n', 'ajustes.html': '{% extends "base.html" %}\n{% block titulo %}Ajustes — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Ajustes</h1>\n    <p class="subtitulo-tela">\n      Com que frequência checar e para onde mandar os avisos.\n    </p>\n\n    <form method="post" class="formulario">\n\n      <fieldset>\n        <legend>Ritmo</legend>\n\n        <label>\n          <span class="rotulo">Checar a cada quantos minutos</span>\n          <input type="number" name="intervalo_minutos" min="1" value="{{ config.intervalo_minutos }}">\n          <span class="ajuda">Abaixo de 10 minutos algumas lojas podem começar a recusar as consultas.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Desistir de uma loja depois de quantos segundos</span>\n          <input type="number" name="timeout_segundos" min="5" value="{{ config.timeout_segundos }}">\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Varredura automática</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="varredura_ativa" value="sim"\n                 {% if config.varredura_auto.ativa %}checked{% endif %}>\n          <span>Varrer as lojas sozinho e adicionar produtos TCG novos ao painel</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Varrer a cada quantos minutos</span>\n          <input type="number" name="varredura_intervalo" min="5"\n                 value="{{ config.varredura_auto.intervalo_minutos }}">\n          <span class="ajuda">Mínimo 5. A cada rodada entram no máximo 30 produtos\n          novos; o resto fica pras rodadas seguintes. Intervalos muito curtos fazem\n          dezenas de buscas por rodada nas lojas — se alguma começar a recusar,\n          aumente aqui.</span>\n        </label>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="varredura_incluir_esgotados" value="sim"\n                 {% if config.varredura_auto.incluir_esgotados %}checked{% endif %}>\n          <span>Incluir esgotados na varredura automática</span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Discord</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="discord_ativo" value="sim"\n                 {% if config.avisos.discord_ativo %}checked{% endif %}>\n          <span>Mandar avisos no Discord</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Link do webhook</span>\n          <input type="text" name="discord_webhook" placeholder="https://discord.com/api/webhooks/..."\n                 value="{{ config.avisos.discord_webhook }}">\n          <span class="ajuda">\n            No Discord: botão direito no canal → Editar Canal → Integrações → Webhooks →\n            Novo Webhook → Copiar URL.\n          </span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Telegram</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="telegram_ativo" value="sim"\n                 {% if config.avisos.telegram_ativo %}checked{% endif %}>\n          <span>Mandar avisos no Telegram</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Token do bot</span>\n          <input type="text" name="telegram_token" value="{{ config.avisos.telegram_token }}">\n          <span class="ajuda">Crie o bot conversando com o @BotFather no Telegram.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Seu chat ID</span>\n          <input type="text" name="telegram_chat_id" value="{{ config.avisos.telegram_chat_id }}">\n          <span class="ajuda">Descubra o seu conversando com o @userinfobot.</span>\n        </label>\n      </fieldset>\n\n      <fieldset>\n        <legend>Email</legend>\n\n        <label class="linha-checkbox">\n          <input type="checkbox" name="email_ativo" value="sim"\n                 {% if config.avisos.email_ativo %}checked{% endif %}>\n          <span>Mandar avisos por email</span>\n        </label>\n\n        <div class="dupla">\n          <label>\n            <span class="rotulo">Servidor</span>\n            <input type="text" name="email_servidor" value="{{ config.avisos.email_servidor }}">\n          </label>\n          <label>\n            <span class="rotulo">Porta</span>\n            <input type="text" name="email_porta" value="{{ config.avisos.email_porta }}">\n          </label>\n        </div>\n\n        <label>\n          <span class="rotulo">Sua conta</span>\n          <input type="text" name="email_usuario" value="{{ config.avisos.email_usuario }}">\n        </label>\n\n        <label>\n          <span class="rotulo">Senha</span>\n          <input type="password" name="email_senha" value="{{ config.avisos.email_senha }}">\n          <span class="ajuda">No Gmail, gere uma "senha de app" — a senha normal da conta não funciona.</span>\n        </label>\n\n        <label>\n          <span class="rotulo">Mandar para</span>\n          <input type="text" name="email_destino" value="{{ config.avisos.email_destino }}">\n        </label>\n      </fieldset>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">Salvar ajustes</button>\n      </div>\n    </form>\n\n    <form method="post" action="{{ url_for(\'testar_avisos\') }}" class="teste">\n      <button class="botao-secundario" type="submit">Enviar mensagem de teste</button>\n      <span class="ajuda">Salve os ajustes antes de testar.</span>\n    </form>\n\n    <p class="linha-diagnostico">\n      Algo parece não estar checando direito?\n      <a href="{{ url_for(\'diagnostico\') }}">Rodar diagnóstico das lojas</a> —\n      mostra o que o servidor está conseguindo ler de cada uma agora (demora\n      alguns segundos pra abrir).\n    </p>\n\n    <p class="alerta-privacidade">\n      Esses dados ficam guardados no servidor da hospedagem, não no seu celular.\n      Cada pessoa entra com a própria senha (variável <code>ACESSOS</code> no\n      Render) — pra tirar o acesso de alguém, remova só a senha dela ali, sem\n      mexer na de mais ninguém.\n    </p>\n  </div>\n\n{% endblock %}\n', 'entrar.html': '<!DOCTYPE html>\n<html lang="pt-BR">\n<head>\n  <meta charset="utf-8">\n  <meta name="viewport" content="width=device-width, initial-scale=1">\n  <title>Entrar — Monitor TCG</title>\n  <link rel="apple-touch-icon" href="/icone.png">\n  <link rel="stylesheet" href="/estilo.css">\n</head>\n<body class="corpo-login">\n  <div class="tela-login">\n    <form method="post" class="cartao-login">\n      <img src="/icone.png" alt="" class="login-icone">\n      <h1 class="login-titulo">Monitor TCG</h1>\n      <p class="login-subtitulo">Acesso restrito — só quem tem senha entra.</p>\n      {% if erro %}<p class="recado recado-erro">{{ erro }}</p>{% endif %}\n      <input type="hidden" name="proximo" value="{{ proximo }}">\n      <label>\n        <span class="rotulo">Senha</span>\n        <input type="password" name="senha" autofocus required>\n      </label>\n      <button class="botao-principal" type="submit">Entrar</button>\n    </form>\n  </div>\n</body>\n</html>\n', 'varredura.html': '{% extends "base.html" %}\n{% block titulo %}Varredura — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Varredura</h1>\n    <p class="subtitulo-tela">\n      O app pesquisa a loja inteira pelas franquias marcadas, filtra o que é\n      produto de TCG (booster, box, deck, blister, lata, kit, pré-release...)\n      e te deixa adicionar tudo de uma vez.\n    </p>\n\n    <form method="post" class="formulario">\n      <label>\n        <span class="rotulo">Loja</span>\n        <select name="loja" required>\n          {% for id, loja in lojas.items() %}\n            <option value="{{ id }}" {% if id == loja_escolhida %}selected{% endif %}>{{ loja.nome }}</option>\n          {% endfor %}\n        </select>\n      </label>\n\n      <span class="rotulo">Franquias</span>\n      <div class="grade-franquias">\n        {% for f in franquias %}\n          <label class="linha-checkbox">\n            <input type="checkbox" name="franquias" value="{{ f }}"\n                   {% if f in franquias_escolhidas %}checked{% endif %}>\n            <span>{{ f }}</span>\n          </label>\n        {% endfor %}\n      </div>\n\n      <label class="linha-checkbox">\n        <input type="checkbox" name="incluir_esgotados" value="sim"\n               {% if incluir_esgotados %}checked{% endif %}>\n        <span>Incluir produtos esgotados\n          <span class="ajuda">Esgotados são justamente os que avisam quando voltarem —\n          vale incluir os que você quer garantir na reposição.</span>\n        </span>\n      </label>\n\n      <div class="acoes-form">\n        <button class="botao-principal" type="submit">Varrer loja</button>\n      </div>\n    </form>\n  </div>\n\n  {% if resultados is not none %}\n    <section class="resultado-varredura">\n      <h2 class="titulo-resultado">{{ resultados | length }} produto(s) encontrados</h2>\n\n      {% if avisos %}\n        <p class="nota-intervalo">{{ avisos | join(" · ") }}</p>\n      {% endif %}\n\n      {% if resultados %}\n        <form method="post" action="{{ url_for(\'varredura_adicionar\') }}">\n          <input type="hidden" name="loja" value="{{ loja_escolhida }}">\n\n          <ul class="lista-varredura">\n            {% for item in resultados %}\n              <li>\n                <label class="linha-checkbox">\n                  <input type="checkbox" name="sel" value="{{ item.json }}"\n                         {% if item.ja_monitorado %}disabled{% else %}checked{% endif %}>\n                  <span class="item-varredura">\n                    <span class="item-nome">{{ item.nome }}</span>\n                    <span class="item-meta">\n                      {{ item.franquia }}\n                      {% if item.preco is not none %} · {{ item.preco | reais }}{% endif %}\n                      {% if item.em_estoque is sameas true %} · disponível\n                      {% elif item.em_estoque is sameas false %} · esgotado{% endif %}\n                      {% if item.ja_monitorado %} · <strong>já monitorado</strong>{% endif %}\n                    </span>\n                  </span>\n                </label>\n              </li>\n            {% endfor %}\n          </ul>\n\n          <div class="acoes-form">\n            <button class="botao-principal" type="submit">Adicionar marcados ao painel</button>\n          </div>\n        </form>\n      {% endif %}\n    </section>\n  {% endif %}\n\n{% endblock %}\n', 'diagnostico.html': '{% extends "base.html" %}\n{% block titulo %}Diagnóstico — Monitor TCG{% endblock %}\n\n{% block conteudo %}\n\n  <div class="painel-form">\n    <h1 class="titulo-tela">Diagnóstico das lojas</h1>\n    <p class="subtitulo-tela">\n      O que o servidor conseguiu ler de cada loja <strong>agora</strong>, ao\n      abrir esta tela. "0 produtos" numa página significa que ela carrega via\n      JavaScript ou mudou de layout; "FALHOU" significa que a loja recusou ou\n      não respondeu a tempo.\n    </p>\n\n    {% for r in relatorios %}\n      <section class="bloco-diagnostico">\n        <h2>{{ r.nome }}</h2>\n        <ul>\n          {% for linha in r.linhas %}\n            <li>{{ linha }}</li>\n          {% endfor %}\n        </ul>\n      </section>\n    {% endfor %}\n\n    <a class="botao-secundario" href="{{ url_for(\'ajustes\') }}">Voltar aos ajustes</a>\n  </div>\n\n{% endblock %}\n'}
 CSS = '/* ==========================================================================\n   Monitor TCG — aparência do app\n\n   A ideia visual: a tela é o feltro de uma mesa de jogo, e cada produto\n   vigiado é uma carta apoiada nela. Produto disponível ganha o brilho\n   dourado de carta foil; esgotado fica opaco, como carta virada.\n\n   Se quiser mudar as cores do app inteiro, mexa só no bloco :root abaixo —\n   todo o resto do arquivo se serve dali.\n   ========================================================================== */\n\n:root {\n  /* ---- cores ---- */\n  --feltro:        #14231f;   /* fundo da página (feltro da mesa) */\n  --feltro-claro:  #1c302a;   /* faixas e caixas sobre o feltro */\n  --feltro-borda:  #2a463d;\n  --carta:         #f4efe2;   /* papel da carta */\n  --carta-sombra:  #ddd5c0;\n  --tinta:         #14120d;   /* texto escuro sobre a carta */\n  --tinta-fraca:   #6b6455;\n  --ouro:          #e0a93b;   /* destaque: disponível, raridade, foco */\n  --ouro-escuro:   #a87d24;\n  --sereno:        #9fb3aa;   /* texto discreto sobre o feltro */\n  --alerta:        #d4695c;   /* erro, sem resposta */\n\n  /* ---- tipos ---- */\n  --display: "Antonio", "Arial Narrow", sans-serif;   /* títulos */\n  --corpo:   "Archivo", system-ui, sans-serif;        /* texto comum */\n  --dados:   "Space Mono", "Courier New", monospace;  /* preços e horários */\n\n  /* ---- medidas ---- */\n  --raio: 10px;\n  --largura-max: 1100px;\n}\n\n* { box-sizing: border-box; }\n\nbody {\n  margin: 0;\n  min-height: 100vh;\n  font-family: var(--corpo);\n  color: var(--carta);\n  /* trama sutil do feltro, feita só com gradientes */\n  background-color: var(--feltro);\n  background-image:\n    repeating-linear-gradient(45deg,  rgba(255,255,255,.014) 0 2px, transparent 2px 4px),\n    repeating-linear-gradient(-45deg, rgba(0,0,0,.05)        0 2px, transparent 2px 4px);\n  display: flex;\n  flex-direction: column;\n}\n\n/* foco pelo teclado: sempre visível, em qualquer botão ou link */\n:focus-visible {\n  outline: 2px solid var(--ouro);\n  outline-offset: 2px;\n  border-radius: 3px;\n}\n\n/* ============================================================ cabeçalho == */\n\n.topo {\n  background: var(--feltro-claro);\n  border-bottom: 1px solid var(--feltro-borda);\n  box-shadow: 0 12px 28px rgba(0,0,0,.28);\n}\n\n.topo-interno {\n  max-width: var(--largura-max);\n  margin: 0 auto;\n  padding: 18px 24px;\n  display: flex;\n  align-items: baseline;\n  justify-content: space-between;\n  gap: 20px;\n  flex-wrap: wrap;\n}\n\n.marca { text-decoration: none; display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }\n\n.marca-nome {\n  font-family: var(--display);\n  font-size: 30px;\n  font-weight: 700;\n  letter-spacing: .06em;\n  text-transform: uppercase;\n  color: var(--carta);\n}\n\n.marca-sub { color: var(--sereno); font-size: 13px; }\n\n.menu { display: flex; gap: 22px; }\n\n.menu a {\n  color: var(--sereno);\n  text-decoration: none;\n  font-size: 14px;\n  font-weight: 500;\n  padding-bottom: 3px;\n  border-bottom: 2px solid transparent;\n}\n\n.menu a:hover { color: var(--carta); }\n.menu a.ativo { color: var(--ouro); border-bottom-color: var(--ouro); }\n\n/* ============================================================== conteúdo == */\n\n.conteudo {\n  flex: 1;\n  width: 100%;\n  max-width: var(--largura-max);\n  margin: 0 auto;\n  padding: 28px 24px 60px;\n}\n\n.recado {\n  padding: 12px 16px;\n  border-radius: var(--raio);\n  border-left: 3px solid var(--ouro);\n  background: var(--feltro-claro);\n  font-size: 14px;\n}\n\n.recado-erro { border-left-color: var(--alerta); }\n.recado-neutro { border-left-color: var(--sereno); }\n\n/* ============================================================== resumo ==== */\n\n.barra-resumo {\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 16px;\n  flex-wrap: wrap;\n  padding-bottom: 14px;\n  border-bottom: 1px solid var(--feltro-borda);\n}\n\n.contagens { display: flex; gap: 18px; flex-wrap: wrap; }\n\n.contagem {\n  font-family: var(--dados);\n  font-size: 13px;\n  color: var(--sereno);\n}\n\n.contagem-ok { color: var(--ouro); }\n.contagem-erro { color: var(--alerta); }\n\n.nota-intervalo {\n  color: var(--sereno);\n  font-size: 13px;\n  margin: 12px 0 26px;\n}\n\n/* ============================================================== botões ==== */\n\n.botao-principal {\n  font-family: var(--display);\n  font-size: 15px;\n  font-weight: 600;\n  letter-spacing: .08em;\n  text-transform: uppercase;\n  color: var(--tinta);\n  background: var(--ouro);\n  border: none;\n  border-radius: var(--raio);\n  padding: 11px 22px;\n  cursor: pointer;\n  text-decoration: none;\n  display: inline-block;\n}\n\n.botao-principal:hover { background: #eab949; }\n\n.botao-secundario {\n  font-family: var(--corpo);\n  font-size: 14px;\n  color: var(--sereno);\n  background: transparent;\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 10px 18px;\n  cursor: pointer;\n  text-decoration: none;\n  display: inline-block;\n}\n\n.botao-secundario:hover { color: var(--carta); border-color: var(--sereno); }\n\n/* ====================================================== grade de cartas === */\n\n.fichario {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));\n  gap: 20px;\n}\n\n.carta {\n  position: relative;\n  overflow: hidden;\n  background: var(--carta);\n  color: var(--tinta);\n  border-radius: var(--raio);\n  border: 1px solid var(--carta-sombra);\n  box-shadow: 0 10px 22px rgba(0,0,0,.30);\n  display: flex;\n  flex-direction: column;\n  min-height: 210px;\n}\n\n.carta-topo {\n  padding: 14px 16px 10px;\n  border-bottom: 1px solid var(--carta-sombra);\n}\n\n.carta-nome {\n  font-family: var(--display);\n  font-size: 19px;\n  font-weight: 600;\n  line-height: 1.15;\n  margin: 0 0 5px;\n}\n\n.carta-loja {\n  font-family: var(--dados);\n  font-size: 11px;\n  color: var(--tinta-fraca);\n}\n\n.carta-corpo { padding: 16px; flex: 1; }\n\n.selo {\n  display: inline-block;\n  font-family: var(--display);\n  font-size: 13px;\n  font-weight: 600;\n  letter-spacing: .12em;\n  text-transform: uppercase;\n  padding: 5px 11px;\n  border-radius: 4px;\n}\n\n.selo-disponivel { background: var(--ouro); color: var(--tinta); }\n.selo-esgotado   { background: #e2ddd0; color: #57503f; }\n.selo-erro       { background: var(--alerta); color: #fff; }\n.selo-novo       { background: #e2ddd0; color: #57503f; }\n\n.carta-preco {\n  font-family: var(--dados);\n  font-size: 25px;\n  font-weight: 700;\n  margin: 12px 0 6px;\n}\n\n.carta-detalhe {\n  font-size: 12px;\n  color: var(--tinta-fraca);\n  margin: 0;\n  line-height: 1.45;\n}\n\n.carta-rodape {\n  border-top: 1px solid var(--carta-sombra);\n  padding: 9px 16px;\n  display: flex;\n  align-items: center;\n  justify-content: space-between;\n  gap: 10px;\n  flex-wrap: wrap;\n  background: rgba(0,0,0,.03);\n}\n\n.carimbo { font-family: var(--dados); font-size: 11px; color: var(--tinta-fraca); }\n\n.carta-acoes { display: flex; align-items: center; gap: 12px; }\n.carta-acoes form { display: inline; }\n\n.carta-acoes a,\n.link-botao {\n  font-family: var(--corpo);\n  font-size: 12px;\n  color: var(--tinta-fraca);\n  text-decoration: none;\n  background: none;\n  border: none;\n  padding: 0;\n  cursor: pointer;\n  border-bottom: 1px solid transparent;\n}\n\n.carta-acoes a:hover,\n.link-botao:hover { color: var(--tinta); border-bottom-color: var(--ouro-escuro); }\n\n/* --- o brilho de carta foil: só aparece em produto disponível --- */\n\n.carta-disponivel { border-color: var(--ouro-escuro); }\n\n.carta-disponivel::after {\n  content: "";\n  position: absolute;\n  inset: 0;\n  pointer-events: none;\n  background: linear-gradient(115deg,\n    transparent 30%,\n    rgba(224,169,59,.20) 45%,\n    rgba(255,255,255,.32) 50%,\n    rgba(224,169,59,.20) 55%,\n    transparent 70%);\n  background-size: 260% 260%;\n  animation: foil 5.5s ease-in-out infinite;\n}\n\n@keyframes foil {\n  0%, 100% { background-position: 130% 0; }\n  50%      { background-position: -30% 0; }\n}\n\n.carta-esgotada { opacity: .72; }\n.carta-erro { border-color: var(--alerta); }\n\n/* quem prefere menos movimento não vê o brilho animado */\n@media (prefers-reduced-motion: reduce) {\n  .carta-disponivel::after { animation: none; opacity: .35; }\n}\n\n/* ============================================================== vazio ===== */\n\n.vazio {\n  text-align: center;\n  padding: 60px 24px;\n  border: 1px dashed var(--feltro-borda);\n  border-radius: var(--raio);\n}\n\n.vazio h2 { font-family: var(--display); font-weight: 600; margin: 0 0 8px; }\n.vazio p { color: var(--sereno); margin: 0 0 20px; }\n\n/* ============================================================ histórico === */\n\n.historico { margin-top: 46px; }\n\n.historico h2 {\n  font-family: var(--display);\n  font-size: 15px;\n  font-weight: 600;\n  letter-spacing: .12em;\n  text-transform: uppercase;\n  color: var(--sereno);\n  border-bottom: 1px solid var(--feltro-borda);\n  padding-bottom: 8px;\n}\n\n.historico ul { list-style: none; margin: 0; padding: 0; }\n\n.historico li {\n  display: flex;\n  gap: 14px;\n  padding: 9px 0;\n  border-bottom: 1px solid rgba(255,255,255,.05);\n  font-size: 13px;\n  color: var(--sereno);\n}\n\n.historico .carimbo { color: var(--ouro); flex-shrink: 0; }\n\n/* ========================================================== formulários === */\n\n.painel-form { max-width: 620px; }\n\n.titulo-tela {\n  font-family: var(--display);\n  font-size: 30px;\n  font-weight: 600;\n  letter-spacing: .03em;\n  margin: 0 0 6px;\n}\n\n.subtitulo-tela { color: var(--sereno); font-size: 14px; margin: 0 0 28px; line-height: 1.5; }\n\n.formulario label { display: block; margin-bottom: 20px; }\n\n.rotulo {\n  display: block;\n  font-size: 13px;\n  font-weight: 600;\n  letter-spacing: .03em;\n  margin-bottom: 7px;\n}\n\n.formulario input[type="text"],\n.formulario input[type="url"],\n.formulario input[type="password"],\n.formulario input[type="number"],\n.formulario select {\n  width: 100%;\n  font-family: var(--corpo);\n  font-size: 14px;\n  color: var(--carta);\n  background: var(--feltro-claro);\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 11px 13px;\n}\n\n.formulario input:focus,\n.formulario select:focus {\n  outline: 2px solid var(--ouro);\n  outline-offset: 1px;\n}\n\n.ajuda {\n  display: block;\n  font-size: 12px;\n  color: var(--sereno);\n  margin-top: 6px;\n  line-height: 1.5;\n}\n\n.formulario .linha-checkbox {\n  display: flex;\n  align-items: flex-start;\n  gap: 10px;\n  font-size: 14px;\n}\n\n.formulario .linha-checkbox input { margin-top: 3px; accent-color: var(--ouro); }\n\n.dupla { display: flex; gap: 14px; }\n.dupla label { flex: 1; }\n\nfieldset {\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 20px;\n  margin: 0 0 24px;\n}\n\nlegend {\n  font-family: var(--display);\n  font-size: 14px;\n  font-weight: 600;\n  letter-spacing: .12em;\n  text-transform: uppercase;\n  color: var(--ouro);\n  padding: 0 8px;\n}\n\n.avancado {\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 14px 18px;\n  margin-bottom: 24px;\n}\n\n.avancado summary {\n  cursor: pointer;\n  font-size: 14px;\n  font-weight: 500;\n  color: var(--sereno);\n}\n\n.avancado[open] summary { margin-bottom: 18px; color: var(--carta); }\n\n.acoes-form { display: flex; align-items: center; gap: 14px; }\n\n.teste {\n  margin-top: 26px;\n  padding-top: 22px;\n  border-top: 1px solid var(--feltro-borda);\n  display: flex;\n  align-items: center;\n  gap: 14px;\n  flex-wrap: wrap;\n}\n\n.teste .ajuda { margin: 0; }\n\n.alerta-privacidade {\n  margin-top: 26px;\n  font-size: 12px;\n  color: var(--sereno);\n  line-height: 1.6;\n}\n\n.alerta-privacidade code {\n  font-family: var(--dados);\n  background: var(--feltro-claro);\n  padding: 2px 6px;\n  border-radius: 4px;\n}\n\n/* ============================================================== rodapé ==== */\n\n.rodape {\n  border-top: 1px solid var(--feltro-borda);\n  padding: 18px 24px;\n  text-align: center;\n  font-size: 12px;\n  color: var(--sereno);\n}\n\n/* ============================================================== celular === */\n\n@media (max-width: 640px) {\n  .topo-interno { padding: 14px 16px; }\n  .menu { gap: 15px; }\n  .conteudo { padding: 20px 16px 40px; }\n  .marca-nome { font-size: 24px; }\n  .marca-sub { display: none; }\n  .fichario { grid-template-columns: 1fr; }\n  .dupla { flex-direction: column; gap: 0; }\n}\n\n/* ====================================================== tela "Celular" ==== */\n\n.cartao-qr {\n  text-align: center;\n  background: var(--feltro-claro);\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 26px 20px;\n  margin-bottom: 28px;\n}\n\n/* QR precisa de fundo claro e margem para a câmera ler com facilidade */\n.qr {\n  display: inline-block;\n  background: #fff;\n  border-radius: var(--raio);\n  padding: 16px;\n  line-height: 0;\n}\n\n.qr svg {\n  width: min(62vw, 240px);\n  height: min(62vw, 240px);\n}\n\n.endereco-celular {\n  font-family: var(--dados);\n  font-size: 18px;\n  color: var(--ouro);\n  margin: 18px 0 4px;\n  word-break: break-all;\n}\n\n.cartao-qr .ajuda { margin-top: 2px; }\n\n.passos {\n  margin: 0 0 26px;\n  padding-left: 22px;\n  line-height: 1.7;\n  font-size: 15px;\n}\n\n.passos li { margin-bottom: 12px; }\n\n.tecla {\n  display: inline-block;\n  font-family: var(--dados);\n  font-size: 13px;\n  background: var(--feltro-claro);\n  border: 1px solid var(--feltro-borda);\n  border-radius: 5px;\n  padding: 1px 7px;\n}\n\n.avisos-celular {\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 16px 20px;\n  font-size: 14px;\n  color: var(--sereno);\n  line-height: 1.65;\n}\n\n.avisos-celular p { margin: 0 0 8px; color: var(--carta); }\n.avisos-celular ul { margin: 0; padding-left: 20px; }\n.avisos-celular li { margin-bottom: 8px; }\n\n/* ============================================= app instalado no iPhone ==== */\n\n/* Respeita o entalhe (notch) e a barra de baixo do iPhone em tela cheia */\n.topo { padding-top: env(safe-area-inset-top, 0); }\n.rodape { padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px)); }\n\n/* ============================================================= tela de login == */\n\nbody.corpo-login { display: block; }\n\n.tela-login {\n  min-height: 100vh;\n  display: flex;\n  align-items: center;\n  justify-content: center;\n  padding: 24px;\n}\n\n.cartao-login {\n  width: 100%;\n  max-width: 340px;\n  background: var(--carta);\n  color: var(--tinta);\n  border-radius: var(--raio);\n  border: 1px solid var(--carta-sombra);\n  box-shadow: 0 20px 44px rgba(0,0,0,.35);\n  padding: 34px 30px;\n  text-align: center;\n}\n\n.login-icone { width: 56px; height: 56px; border-radius: 8px; margin-bottom: 14px; }\n\n.login-titulo {\n  font-family: var(--display);\n  font-size: 24px;\n  font-weight: 700;\n  letter-spacing: .04em;\n  text-transform: uppercase;\n  margin: 0 0 6px;\n}\n\n.login-subtitulo { color: var(--tinta-fraca); font-size: 13px; margin: 0 0 20px; }\n\n.cartao-login label { display: block; margin-bottom: 18px; text-align: left; }\n.cartao-login .recado { text-align: left; margin-bottom: 16px; }\n.cartao-login .botao-principal { width: 100%; }\n\n.menu-sair { opacity: .75; }\n.menu-sair:hover { opacity: 1; }\n\n/* ==================================================== banner de aviso sonoro == */\n\n.banner-som {\n  display: none;\n  align-items: center;\n  justify-content: space-between;\n  gap: 12px;\n  flex-wrap: wrap;\n  background: var(--feltro-claro);\n  border: 1px solid var(--ouro-escuro);\n  border-radius: var(--raio);\n  padding: 10px 16px;\n  margin-bottom: 18px;\n  font-size: 13px;\n  color: var(--sereno);\n}\n\n/* ============================================================== varredura == */\n\n.grade-franquias {\n  display: grid;\n  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));\n  gap: 8px 14px;\n  margin: 8px 0 22px;\n}\n\n.grade-franquias .linha-checkbox { margin-bottom: 0; text-transform: capitalize; }\n\n.resultado-varredura { margin-top: 40px; }\n\n.titulo-resultado {\n  font-family: var(--display);\n  font-size: 17px;\n  font-weight: 600;\n  letter-spacing: .1em;\n  text-transform: uppercase;\n  color: var(--ouro);\n  border-bottom: 1px solid var(--feltro-borda);\n  padding-bottom: 8px;\n}\n\n.lista-varredura { list-style: none; margin: 0 0 20px; padding: 0; }\n\n.lista-varredura li {\n  border-bottom: 1px solid rgba(255,255,255,.06);\n  padding: 10px 0;\n}\n\n.lista-varredura .linha-checkbox { display: flex; align-items: flex-start; gap: 10px; margin: 0; }\n.lista-varredura input { margin-top: 4px; accent-color: var(--ouro); }\n.lista-varredura input:disabled + .item-varredura { opacity: .45; }\n\n.item-varredura { display: flex; flex-direction: column; gap: 2px; }\n.item-nome { font-size: 14px; line-height: 1.35; }\n.item-meta { font-family: var(--dados); font-size: 11px; color: var(--sereno); }\n.lista-varredura .item-meta { text-transform: capitalize; }\n\n/* ==================================================== outros produtos ==== */\n\n.outros-produtos {\n  margin-top: 32px;\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 14px 18px;\n}\n\n.outros-produtos summary {\n  cursor: pointer;\n  font-family: var(--display);\n  font-size: 13px;\n  font-weight: 600;\n  letter-spacing: .1em;\n  text-transform: uppercase;\n  color: var(--sereno);\n}\n\n.outros-produtos[open] summary { margin-bottom: 14px; color: var(--carta); }\n\n.lista-outros { list-style: none; margin: 0; padding: 0; }\n\n.lista-outros li {\n  display: flex;\n  align-items: center;\n  gap: 10px;\n  flex-wrap: wrap;\n  padding: 9px 0;\n  border-bottom: 1px solid rgba(255,255,255,.06);\n  font-size: 13px;\n}\n\n.lista-outros li:last-child { border-bottom: none; }\n.lista-outros .item-nome { flex: 1; min-width: 140px; }\n.lista-outros .item-meta { color: var(--sereno); font-size: 12px; }\n.lista-outros .selo { font-size: 10px; padding: 3px 8px; flex-shrink: 0; }\n\n/* ============================================================ diagnostico == */\n\n.linha-diagnostico {\n  margin-top: 26px;\n  font-size: 13px;\n  color: var(--sereno);\n  line-height: 1.6;\n}\n\n.linha-diagnostico a { color: var(--ouro); }\n\n.bloco-diagnostico {\n  border: 1px solid var(--feltro-borda);\n  border-radius: var(--raio);\n  padding: 14px 18px;\n  margin-bottom: 16px;\n}\n\n.bloco-diagnostico h2 {\n  font-family: var(--display);\n  font-size: 15px;\n  font-weight: 600;\n  letter-spacing: .08em;\n  text-transform: uppercase;\n  color: var(--ouro);\n  margin: 0 0 8px;\n}\n\n.bloco-diagnostico ul { list-style: none; margin: 0; padding: 0; }\n\n.bloco-diagnostico li {\n  font-family: var(--dados);\n  font-size: 12px;\n  color: var(--sereno);\n  padding: 4px 0;\n  word-break: break-all;\n}\n'
+TEMPLATES['mercado.html'] = '''{% extends "base.html" %}
+{% block titulo %}Mercado — Monitor TCG{% endblock %}
+
+{% block conteudo %}
+
+  <h1 class="titulo-tela">Mercado</h1>
+  <p class="subtitulo-tela">
+    Historico de preco montado pelas proprias checagens do monitor — quanto
+    mais tempo o app rodar, mais completo o grafico fica. A variacao compara
+    o preco de agora com o que o produto custava ha 24h, 7 dias e 30 dias.
+  </p>
+
+  {% if not ativos %}
+    <div class="vazio">
+      <h2>Ainda sem historico</h2>
+      <p>O grafico nasce das checagens: assim que os produtos monitorados
+      tiverem preco registrado mais de uma vez, eles aparecem aqui.</p>
+      <a class="botao-principal" href="{{ url_for('painel') }}">Ver o painel</a>
+    </div>
+  {% endif %}
+
+  {% for item in ativos %}
+    <article class="ticker {{ 'ticker-sobe' if item.direcao == 'sobe' else ('ticker-desce' if item.direcao == 'desce' else '') }}">
+      <div class="ticker-cabeca">
+        <div>
+          <h2 class="ticker-nome">{{ item.nome }}</h2>
+          <span class="ticker-loja">{{ item.loja }}</span>
+        </div>
+        <div class="ticker-preco-bloco">
+          <span class="ticker-preco">{{ item.preco | reais }}</span>
+          {% if item.var_ultima is not none %}
+            <span class="variacao {{ 'sobe' if item.var_ultima >= 0 else 'desce' }}">
+              {{ '▲' if item.var_ultima >= 0 else '▼' }} {{ '%.2f' | format(item.var_ultima | abs) }}%
+            </span>
+          {% endif %}
+        </div>
+      </div>
+
+      <div class="ticker-linha">
+        {% for rotulo, valor in item.janelas %}
+          <span class="janela">
+            <span class="janela-rotulo">{{ rotulo }}</span>
+            {% if valor is none %}
+              <span class="janela-valor mudo">—</span>
+            {% else %}
+              <span class="janela-valor {{ 'sobe' if valor >= 0 else 'desce' }}">
+                {{ '▲' if valor >= 0 else '▼' }} {{ '%.2f' | format(valor | abs) }}%
+              </span>
+            {% endif %}
+          </span>
+        {% endfor %}
+        <span class="janela">
+          <span class="janela-rotulo">faixa</span>
+          <span class="janela-valor mudo">{{ item.minimo | reais }} – {{ item.maximo | reais }}</span>
+        </span>
+      </div>
+
+      {{ item.grafico | safe }}
+
+      <div class="ticker-rodape">
+        <span class="carimbo">preço mudou {{ item.mudou_em | atras }} · visto {{ item.visto_em | atras }}</span>
+        <a href="{{ item.url }}" target="_blank" rel="noopener">abrir loja</a>
+      </div>
+    </article>
+  {% endfor %}
+
+{% endblock %}
+'''
+
+CSS_MERCADO = """
+/* ============================================================== mercado === */
+
+.ticker {
+  background: var(--feltro-claro);
+  border: 1px solid var(--feltro-borda);
+  border-left: 3px solid var(--feltro-borda);
+  border-radius: var(--raio);
+  padding: 16px 18px;
+  margin-bottom: 16px;
+}
+
+.ticker-sobe  { border-left-color: #3fae6a; }
+.ticker-desce { border-left-color: var(--alerta); }
+
+.ticker-cabeca {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.ticker-nome {
+  font-family: var(--display);
+  font-size: 18px;
+  font-weight: 600;
+  margin: 0 0 2px;
+  line-height: 1.2;
+}
+
+.ticker-loja { font-family: var(--dados); font-size: 11px; color: var(--sereno); }
+
+.ticker-preco-bloco { display: flex; align-items: baseline; gap: 10px; }
+
+.ticker-preco {
+  font-family: var(--dados);
+  font-size: 26px;
+  font-weight: 700;
+  color: var(--carta);
+}
+
+.variacao {
+  font-family: var(--dados);
+  font-size: 13px;
+  font-weight: 700;
+  padding: 3px 8px;
+  border-radius: 5px;
+}
+
+.sobe  { color: #57d98a; }
+.desce { color: #ef8b7e; }
+.variacao.sobe  { background: rgba(63,174,106,.16); }
+.variacao.desce { background: rgba(212,105,92,.16); }
+.mudo { color: var(--sereno); }
+
+.ticker-linha {
+  display: flex;
+  gap: 20px;
+  flex-wrap: wrap;
+  margin: 12px 0 6px;
+}
+
+.janela { display: flex; flex-direction: column; gap: 1px; }
+.janela-rotulo {
+  font-family: var(--dados);
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  color: var(--sereno);
+}
+.janela-valor { font-family: var(--dados); font-size: 13px; font-weight: 700; }
+
+.grafico-preco { width: 100%; height: 64px; display: block; margin-top: 6px; }
+
+.ticker-rodape {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+}
+
+.ticker-rodape a { font-size: 12px; color: var(--sereno); }
+.ticker-rodape a:hover { color: var(--carta); }
+"""
+CSS = CSS + CSS_MERCADO
+
 ICONE_PNG_BASE64 = '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'
 
 # ============================================================================
@@ -101,9 +259,23 @@ def atualizar_produto(dados, produto_id, em_estoque, preco, detalhe, erro=None):
             and anterior.get("preco") != preco
         ),
     }
+
+    # Historico de precos: a materia-prima da tela Mercado. Guarda um ponto
+    # por checagem com preco — mas so cria ponto novo se o preco mudou, pra
+    # nao inchar o arquivo (o ultimo ponto ganha so um "visto de novo").
+    historico = list(anterior.get("historico_precos") or [])
+    agora_iso = datetime.now(timezone.utc).isoformat()
+    if preco is not None:
+        if historico and historico[-1]["p"] == preco:
+            historico[-1]["v"] = agora_iso          # mesmo preco: so atualiza o "visto em"
+        else:
+            historico.append({"p": preco, "q": agora_iso, "v": agora_iso})
+        del historico[:-240]                          # guarda os 240 pontos mais recentes
+
     dados["estado"][produto_id] = {
         "em_estoque": em_estoque, "preco": preco, "detalhe": detalhe, "erro": erro,
-        "checado_em": datetime.now(timezone.utc).isoformat(),
+        "checado_em": agora_iso,
+        "historico_precos": historico,
     }
     return mudancas
 
@@ -147,14 +319,8 @@ CABECALHOS = {
 # ============================================================================
 
 PAUSA_MINIMA = 3.0          # segundos entre dois acessos ao mesmo site
-CASTIGO_INICIAL = 120       # 2 min de silencio na primeira recusa
-CASTIGO_MAXIMO = 45 * 60    # teto: 45 min
-#
-# O teto era de 3 horas. Na pratica, um unico 403 (comum quando a loja ve o
-# IP de datacenter da hospedagem) fazia a loja inteira sumir do painel pelo
-# resto da tarde — varios produtos "sem resposta" ao mesmo tempo, sem o
-# usuario entender por que. 45 min mantem a educacao com a loja e devolve o
-# monitor ao ar no mesmo dia. Da pra zerar na mao pelo /diagnostico.
+CASTIGO_INICIAL = 300       # 5 min de silencio na primeira recusa
+CASTIGO_MAXIMO = 3 * 3600   # teto: 3 horas
 
 # Caminhos-armadilha: NUNCA abrir, em nenhum site.
 CAMINHOS_PROIBIDOS = ("/bnegro", "/honeypot", "/trap", "/spider-trap")
@@ -353,21 +519,6 @@ def checar_vtex(produto, timeout=15):
             return {"em_estoque": em_estoque, "preco": casado["preco"],
                     "detalhe": "encontrado na vitrine da loja (API indisponivel)"}
 
-    # Ultima tentativa antes de desistir: ler a propria pagina do produto e
-    # pegar o bloco de dados oficial (JSON-LD). Nas lojas VTEX IO esse bloco
-    # vem no HTML mesmo com a pagina montada por JavaScript — e o caminho
-    # que salva a Copag quando as duas APIs falham.
-    try:
-        r = requests.get(produto["url"], headers=CABECALHOS, timeout=timeout)
-        if r.ok:
-            sopa = BeautifulSoup(r.content, "html.parser")
-            est, preco, _ = _ler_dados_estruturados(sopa)
-            if est is not None:
-                return {"em_estoque": est, "preco": preco,
-                        "detalhe": "dados oficiais da pagina do produto (API fora)"}
-    except requests.RequestException:
-        pass
-
     return {"em_estoque": None, "preco": None,
             "detalhe": "API indisponivel e o produto nao apareceu em nenhuma vitrine configurada agora"}
 
@@ -381,11 +532,7 @@ def checar_woocommerce(produto, timeout=15):
         return checar_html(produto, timeout=timeout)
     itens = r.json()
     if not itens:
-        # A busca por termo da API nao achou (o termo sai da URL e nem sempre
-        # bate com o indice da loja). Em vez de desistir e deixar o produto
-        # mudo, le a pagina do produto — que e o endereco exato que o usuario
-        # colou e nao depende de acertar palavra nenhuma.
-        return checar_html(produto, timeout=timeout)
+        return {"em_estoque": None, "preco": None, "detalhe": "produto nao encontrado — revise o termo de busca"}
     item = itens[0]
     preco = None
     precos = item.get("prices") or {}
@@ -414,123 +561,6 @@ def _extrair_preco_da_regiao(regiao):
             return converter_preco(m.group(0))
     m = PADRAO_PRECO.search(regiao.get_text(" ", strip=True))
     return converter_preco(m.group(0)) if m else None
-
-
-_DISPONIVEL_SCHEMA = ("instock", "in_stock", "limitedavailability", "onlineonly",
-                       "preorder", "presale", "backorder")
-_INDISPONIVEL_SCHEMA = ("outofstock", "out_of_stock", "soldout", "sold_out",
-                         "discontinued")
-
-
-def _normalizar_disponibilidade(valor):
-    """
-    Traduz o campo 'availability' do padrao schema.org para True/False/None.
-    Vem em formatos variados: 'InStock', 'http://schema.org/InStock',
-    'https://schema.org/OutOfStock', 'out of stock'...
-    """
-    if not valor:
-        return None
-    texto = str(valor).strip().lower().rsplit("/", 1)[-1].replace(" ", "").replace("-", "")
-    if any(marca in texto for marca in _INDISPONIVEL_SCHEMA):
-        return False
-    if any(marca in texto for marca in _DISPONIVEL_SCHEMA):
-        return True
-    return None
-
-
-def _achatar_json(no):
-    """Percorre um JSON aninhado e devolve todos os dicionarios de dentro."""
-    if isinstance(no, dict):
-        yield no
-        for valor in no.values():
-            yield from _achatar_json(valor)
-    elif isinstance(no, list):
-        for item in no:
-            yield from _achatar_json(item)
-
-
-def _ler_dados_estruturados(sopa):
-    """
-    Le o bloco de dados que a loja publica para o Google Shopping
-    (JSON-LD schema.org/Product) e, se nao houver, as meta tags de produto.
-
-    POR QUE ISSO E O CONSERTO PRINCIPAL DO "SEM RESPOSTA":
-    quando a loja monta a pagina por JavaScript (Copag e outras VTEX IO sao
-    assim), o HTML que chega aqui vem praticamente vazio — sem titulo, sem
-    preco, sem botao de comprar. Nenhuma heuristica acha nada, e o produto
-    fica sem resposta. Mas esse bloco de dados vem PRONTO no HTML mesmo
-    nessas lojas, porque senao o produto nao apareceria no Google. E, de
-    quebra, e informacao declarada pela propria loja: nao e chute.
-
-    Devolve (em_estoque, preco, detalhe) — qualquer um pode vir None.
-    """
-    import json as _json
-
-    # --- 1. JSON-LD (o mais completo e o mais comum) ---
-    for bloco in sopa.find_all("script", type="application/ld+json"):
-        try:
-            dados = _json.loads(bloco.string or bloco.get_text() or "")
-        except (ValueError, TypeError):
-            continue
-        for no in _achatar_json(dados):
-            tipo = no.get("@type") or no.get("type") or ""
-            tipos = tipo if isinstance(tipo, list) else [tipo]
-            if not any(str(t).lower() == "product" for t in tipos):
-                continue
-            ofertas = no.get("offers") or {}
-            for oferta in _achatar_json(ofertas):
-                disponivel = _normalizar_disponibilidade(
-                    oferta.get("availability") or oferta.get("availabilityStatus"))
-                preco_bruto = oferta.get("price") or oferta.get("lowPrice")
-                preco = None
-                if preco_bruto is not None:
-                    try:
-                        preco = float(str(preco_bruto).replace(",", "."))
-                    except ValueError:
-                        preco = converter_preco(str(preco_bruto))
-                if disponivel is not None or preco is not None:
-                    return disponivel, preco, "dados oficiais da loja (JSON-LD)"
-
-    # --- 2. Meta tags (Open Graph / product) — plano B ---
-    def meta(*nomes):
-        for nome in nomes:
-            el = (sopa.find("meta", property=nome)
-                  or sopa.find("meta", attrs={"name": nome})
-                  or sopa.find("meta", attrs={"itemprop": nome}))
-            if el and el.get("content"):
-                return el["content"]
-        return None
-
-    disponivel = _normalizar_disponibilidade(
-        meta("product:availability", "og:availability", "availability"))
-    preco_meta = meta("product:price:amount", "og:price:amount", "price")
-    preco = None
-    if preco_meta:
-        try:
-            preco = float(str(preco_meta).replace(",", "."))
-        except ValueError:
-            preco = converter_preco(str(preco_meta))
-    if disponivel is not None or preco is not None:
-        return disponivel, preco, "dados oficiais da loja (meta tags)"
-
-    return None, None, ""
-
-
-def _pagina_e_casca_js(sopa):
-    """
-    Detecta a pagina que chega 'vazia' porque a loja monta tudo por
-    JavaScript. Serve pra dar um recado claro em vez de um silencio.
-    """
-    corpo = sopa.find("body")
-    if corpo is None:
-        return True
-    texto = corpo.get_text(" ", strip=True)
-    if len(texto) > 800:
-        return False
-    marcas = ("__NEXT_DATA__", "__INITIAL_STATE__", "window.__", "id=\"root\"",
-              "id=\"app\"", "vtex.render", "nuxt")
-    bruto = str(sopa)[:20000].lower()
-    return any(m.lower() in bruto for m in marcas)
 
 
 def _analisar_regiao_do_produto(sopa, palavras_esgotado):
@@ -574,25 +604,6 @@ def checar_html(produto, timeout=15):
     sopa = BeautifulSoup(r.content, "html.parser")
     palavras = [pal.lower() for pal in (produto.get("palavras_esgotado") or PALAVRAS_ESGOTADO)]
 
-    # PRIMEIRO DE TUDO: o que a propria loja declara (JSON-LD / meta tags).
-    # E mais confiavel que qualquer leitura visual e funciona ate quando a
-    # pagina vem montada por JavaScript. So nao usa se o usuario configurou
-    # um seletor manual — nesse caso a escolha dele manda.
-    if not produto.get("seletor_estoque"):
-        est_oficial, preco_oficial, detalhe_oficial = _ler_dados_estruturados(sopa)
-        if est_oficial is not None:
-            preco_final = preco_oficial
-            if produto.get("seletor_preco"):
-                el = sopa.select_one(produto["seletor_preco"])
-                if el:
-                    manual = converter_preco(el.get_text(strip=True))
-                    if manual is not None:
-                        preco_final = manual
-            return {"em_estoque": est_oficial, "preco": preco_final,
-                    "detalhe": detalhe_oficial}
-    else:
-        est_oficial = preco_oficial = None
-
     seletor = produto.get("seletor_estoque")
     if seletor:
         elemento = sopa.select_one(seletor)
@@ -606,47 +617,12 @@ def checar_html(produto, timeout=15):
     else:
         # 1a tentativa: so a regiao do produto (precisa, evita falso esgotado e pega o preco junto)
         em_estoque, preco, detalhe = _analisar_regiao_do_produto(sopa, palavras)
-        # 2a tentativa: pagina inteira — MAS sem poder condenar sozinha.
-        #
-        # ERA AQUI O FALSO "ESGOTADO": a pagina de um produto disponivel
-        # quase sempre contem a palavra "esgotado" em OUTRO lugar (a
-        # prateleira de "produtos relacionados", o widget "avise-me quando
-        # chegar" do rodape, um item da mesma colecao). A busca ampla lia
-        # essa palavra e marcava o produto como esgotado.
-        #
-        # Agora a palavra solta so vale se NAO houver botao de compra na
-        # pagina. Se existe botao de compra, o produto esta a venda e a
-        # palavra veio de outro bloco — resultado fica "nao sei" em vez de
-        # um "esgotado" errado.
+        # 2a tentativa: pagina inteira (menos precisa, mas melhor que nada)
         if em_estoque is None:
             texto = sopa.get_text(" ", strip=True).lower()
             achou = next((pal for pal in palavras if pal in texto), None)
-
-            tem_botao_compra = any(
-                any(c in ((b.get_text(" ", strip=True) or b.get("value") or "").lower())
-                    for c in PALAVRAS_COMPRAR)
-                for b in sopa.find_all(["button", "a", "input"])
-            )
-
-            if tem_botao_compra:
-                em_estoque = True
-                detalhe = "botao de compra encontrado na pagina (busca ampla)"
-            elif achou:
-                em_estoque = False
-                detalhe = f"sem botao de compra e achei '{achou}' na pagina (busca ampla)"
-            else:
-                # Sem resposta: aqui a gente diz POR QUE, em vez de deixar
-                # o produto mudo no painel.
-                if _pagina_e_casca_js(sopa):
-                    em_estoque = None
-                    detalhe = ("a loja monta a pagina por JavaScript — o conteudo nao "
-                               "vem no HTML. Use o link da API/vitrine ou um seletor manual")
-                elif len(sopa.get_text(" ", strip=True)) < 400:
-                    em_estoque = None
-                    detalhe = "a loja devolveu uma pagina quase vazia (possivel bloqueio ao servidor)"
-                else:
-                    em_estoque = None
-                    detalhe = "pagina lida, mas sem preco, botao de compra nem aviso de esgotado"
+            em_estoque = achou is None
+            detalhe = f"achei a palavra '{achou}' na pagina (busca ampla)" if achou else "nenhum sinal de esgotado na pagina"
 
     # Seletor manual de preco, quando configurado, tem prioridade sobre o automatico
     if produto.get("seletor_preco"):
@@ -682,11 +658,6 @@ CATEGORIAS_VARREDURA = [
     "booster", "box", "display", "deck", "blister", "lata", "latas", "kit",
     "pré-lançamento", "pre-lancamento", "pré lançamento", "pre release", "prerelease",
     "bundle", "treinador avançado", "etb", "estrutural", "starter", "pacote",
-    # acrescentados: nomes que apareciam em pre-venda e colecionador e
-    # ficavam de fora do filtro (ex: "Collector Booster" ja passava, mas
-    # "Commander" e "Pré-venda" sozinhos, nao).
-    "collector", "colecionador", "commander", "tin", "caixa", "case",
-    "pré-venda", "pre-venda", "pré venda", "booster box", "gift",
 ]
 
 LOJAS_VARREDURA = {
@@ -779,96 +750,6 @@ def _extrair_nome_link(a_tag, texto_bruto):
     return re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
 
 
-def _regiao_do_card(a_tag, niveis=4):
-    """
-    Sobe do link do produto ate o "card" que o contem.
-
-    POR QUE ISSO EXISTE: em vitrine de loja, o link costuma envolver so a
-    imagem e o nome. O PRECO e o selo "Esgotado" ficam do lado de fora do
-    link, como irmaos, dentro do mesmo card. Quem le so o texto do <a>
-    nunca ve o preco (era o caso da Copag) e nunca ve o esgotado.
-
-    Para de subir quando a regiao passa a conter mais de um link de
-    produto — sinal de que ja saiu do card e entrou na grade inteira
-    (subir demais faria pegar o preco do produto vizinho).
-    """
-    regiao = a_tag
-    for _ in range(niveis):
-        pai = regiao.parent
-        if pai is None or pai.name in ("body", "html", "[document]"):
-            break
-        if _tem_outro_produto(pai):
-            break          # o pai ja e a grade: o card era o nivel anterior
-        regiao = pai
-    return regiao
-
-
-def _tem_outro_produto(elemento):
-    """
-    Diz se um elemento ja engloba MAIS DE UM produto.
-
-    E o freio do _regiao_do_card: sem ele a regiao sobe ate a grade inteira
-    e o produto acaba herdando o preco (ou o "Esgotado") do vizinho.
-
-    Dois sinais, porque nem toda vitrine usa imagem:
-      - mais de um link contendo imagem  -> mais de um card
-      - mais de dois enderecos distintos -> idem (um card sozinho costuma
-        repetir o mesmo link na imagem, no nome e no botao)
-    """
-    links = elemento.find_all("a", href=True)
-    if sum(1 for a in links if a.find("img")) > 1:
-        return True
-    return len({a["href"] for a in links}) > 2
-
-
-# Classes/atributos que marcam o preço ANTIGO de uma promoção "de/por".
-# Serve pra não alertar o preço riscado no lugar do que você realmente paga.
-_MARCAS_PRECO_ANTIGO = ("old", "regular", "listprice", "de-por", "antigo", "riscado")
-
-
-def _preco_do_card(a_tag, texto_link):
-    """
-    Acha o preço do produto: primeiro no texto do próprio link, e se não
-    houver (o caso mais comum), na região do card ao redor dele.
-    Ignora preço riscado, tanto por marcação (<del>/<s>) quanto por classe.
-    """
-    achado = PADRAO_PRECO.search(texto_link)
-    if achado:
-        return converter_preco(achado.group(0))
-
-    regiao = _regiao_do_card(a_tag)
-    for texto in regiao.find_all(string=PADRAO_PRECO):
-        pai = texto.find_parent(["del", "s", "strike"])
-        if pai is not None:
-            continue
-        classes = " ".join(
-            (texto.parent.get("class") or []) if texto.parent else []
-        ).lower()
-        if any(marca in classes for marca in _MARCAS_PRECO_ANTIGO):
-            continue
-        m = PADRAO_PRECO.search(texto)
-        if m:
-            return converter_preco(m.group(0))
-
-    m = PADRAO_PRECO.search(regiao.get_text(" ", strip=True))
-    return converter_preco(m.group(0)) if m else None
-
-
-def _esgotado_no_card(a_tag, texto_link):
-    """
-    Diz se o card está marcado como esgotado. Olha o texto do link e a
-    região do card — muitas lojas põem o selo "Esgotado" fora do link.
-    Devolve None (não sei) quando não há nenhum sinal.
-    """
-    if any(p in texto_link.lower() for p in PALAVRAS_ESGOTADO):
-        return True
-    regiao = _regiao_do_card(a_tag)
-    texto_regiao = regiao.get_text(" ", strip=True).lower()
-    if any(p in texto_regiao for p in PALAVRAS_ESGOTADO):
-        return True
-    return None
-
-
 def _inferir_franquia(nome, franquias):
     """Tenta adivinhar a franquia pelo nome, só pra organizar a exibição."""
     normalizado = (nome.lower().replace("é", "e").replace("ê", "e")
@@ -944,27 +825,21 @@ def varrer_html(base_url, termo, timeout=15):
         achados, vistos = [], set()
         for a in sopa.find_all("a", href=True):
             texto = a.get_text(" ", strip=True)
-            # Nas paginas de busca, o selo "Esgotado" costuma vir grudado no
-            # texto do link do produto. Aqui a gente separa: vira status, e
-            # sai do nome.
-            nome = _extrair_nome_link(a, texto)
-            nome = re.sub(r"(esgotado|indispon[ií]vel|fora de estoque|sold out|avise-?me( quando chegar)?)",
-                           "", nome, flags=re.IGNORECASE)
-            nome = re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
-
-            # Filtra pelo nome ja resolvido (title/alt), nao pelo texto cru:
-            # links so-imagem tambem entram agora.
-            if len(nome) < 12 or not _nome_parece_tcg(nome):
+            if len(texto) < 12 or not _nome_parece_tcg(texto):
                 continue
-
             destino = urljoin(base_url + "/", a["href"])
             if not destino.startswith(base_url) or destino in vistos:
                 continue
             vistos.add(destino)
-
-            esgotado = _esgotado_no_card(a, texto)
-            achados.append({"nome": nome[:120], "url": destino,
-                             "preco": _preco_do_card(a, texto),
+            # Nas paginas de busca, o selo "Esgotado" costuma vir grudado no
+            # texto do link do produto. Aqui a gente separa: vira status, e
+            # sai do nome.
+            minusculo = texto.lower()
+            esgotado = any(p in minusculo for p in PALAVRAS_ESGOTADO)
+            nome = re.sub(r"(esgotado|indispon[ií]vel|fora de estoque|sold out|avise-?me( quando chegar)?)",
+                           "", texto, flags=re.IGNORECASE)
+            nome = re.sub(r"\s{2,}", " ", nome).strip(" -·|–")
+            achados.append({"nome": nome[:120], "url": destino, "preco": None,
                              "em_estoque": False if esgotado else None})
         if achados:
             return achados
@@ -987,26 +862,20 @@ def varrer_pagina_fixa(url, timeout=15):
     achados, vistos = [], set()
     for a in sopa.find_all("a", href=True):
         texto = a.get_text(" ", strip=True)
-
-        # IMPORTANTE: resolve o nome ANTES de filtrar.
-        # Antes o filtro rodava no texto cru do link e descartava todo
-        # produto cujo link e so a imagem (texto vazio) — o nome real
-        # estava no title/alt e nunca era testado. Era por isso que a
-        # pre-venda da Dalaran nao aparecia na varredura.
-        nome = _extrair_nome_link(a, texto)
-        if len(nome) < 12 or not _nome_parece_tcg(nome):
+        if len(texto) < 12 or not _nome_parece_tcg(texto):
             continue
-
         destino = urljoin(base_url + "/", a["href"])
         if not destino.startswith(base_url) or destino in vistos:
             continue
         vistos.add(destino)
 
-        esgotado = _esgotado_no_card(a, texto)
+        minusculo = texto.lower()
+        esgotado = any(p in minusculo for p in PALAVRAS_ESGOTADO)
+        preco_m = PADRAO_PRECO.search(texto)
         achados.append({
-            "nome": nome[:120],
+            "nome": _extrair_nome_link(a, texto)[:120],
             "url": destino,
-            "preco": _preco_do_card(a, texto),
+            "preco": converter_preco(preco_m.group(0)) if preco_m else None,
             "em_estoque": False if esgotado else None,
         })
     return achados
@@ -1589,34 +1458,6 @@ def diagnostico():
     pra diferenciar 'o app nao esta checando' de 'a loja nao esta respondendo'.
     """
     relatorios = []
-
-    # --- Bloco 1: POR QUE cada produto esta sem resposta ---
-    # Este e o bloco que responde "muitos estao sem resposta": em vez de so
-    # dizer que falhou, mostra o motivo que a ultima checagem registrou.
-    dados = ler_dados()
-    mudos = []
-    for produto in dados["produtos"]:
-        estado = dados["estado"].get(produto["id"], {})
-        if estado.get("em_estoque") is not None:
-            continue
-        motivo = estado.get("erro") or estado.get("detalhe") or "ainda nao foi checado"
-        mudos.append(f"{produto.get('nome', '?')[:45]} [{produto.get('metodo', 'html')}] → {motivo}")
-    relatorios.append({
-        "nome": f"Produtos sem resposta ({len(mudos)} de {len(dados['produtos'])})",
-        "linhas": mudos or ["nenhum — todos os produtos responderam na ultima checagem"],
-    })
-
-    # --- Bloco 2: lojas em castigo (silencio temporario apos recusa) ---
-    agora = time.time()
-    em_castigo = [f"{dominio} → em silencio por mais {int((ate - agora) // 60) + 1} min "
-                  f"({_recusas.get(dominio, 0)} recusa(s) seguida(s))"
-                  for dominio, ate in _castigo_ate.items() if ate > agora]
-    relatorios.append({
-        "nome": "Lojas em castigo agora",
-        "linhas": em_castigo or ["nenhuma — todas as lojas estao sendo consultadas normalmente"],
-    })
-
-    # --- Bloco 3: teste ao vivo de cada loja (o que ja existia) ---
     for loja_id, loja in LOJAS_VARREDURA.items():
         linhas = []
         paginas = loja.get("pagina_fixa")
@@ -1638,6 +1479,100 @@ def diagnostico():
         relatorios.append({"nome": loja.get("nome", loja_id), "linhas": linhas})
 
     return render_template("diagnostico.html", relatorios=relatorios)
+
+
+@app.route("/mercado")
+def mercado():
+    """
+    Tela estilo painel de cripto: preco atual, variacao % em 24h / 7d / 30d,
+    faixa minimo-maximo e grafico de linha — tudo calculado a partir dos
+    precos que as proprias checagens do monitor foram guardando.
+    """
+    dados = ler_dados()
+    agora = datetime.now(timezone.utc)
+    ativos = []
+
+    for produto in dados["produtos"]:
+        s = dados["estado"].get(produto["id"]) or {}
+        historico = s.get("historico_precos") or []
+        if not historico or s.get("preco") is None:
+            continue
+
+        preco_atual = s["preco"]
+        pontos = [(datetime.fromisoformat(h["q"]), h["p"]) for h in historico]
+
+        def variacao_em(horas):
+            """Compara o preco de agora com o que valia ha N horas."""
+            alvo = agora.timestamp() - horas * 3600
+            base = None
+            for quando, preco in pontos:
+                if quando.timestamp() <= alvo:
+                    base = preco       # o ultimo preco registrado ANTES da janela
+                else:
+                    break
+            if base is None:
+                # historico mais novo que a janela: usa o primeiro ponto se a
+                # serie ja cobre pelo menos metade dela; senao, "sem dado"
+                inicio = pontos[0][0].timestamp()
+                if agora.timestamp() - inicio >= horas * 1800:
+                    base = pontos[0][1]
+            if not base:
+                return None
+            return (preco_atual - base) / base * 100
+
+        precos = [p for _, p in pontos]
+        penultimo = precos[-2] if len(precos) > 1 else None
+        var_ultima = ((preco_atual - penultimo) / penultimo * 100) if penultimo else None
+        var24 = variacao_em(24)
+
+        direcao = "neutro"
+        referencia = var24 if var24 is not None else var_ultima
+        if referencia is not None:
+            direcao = "sobe" if referencia >= 0 else "desce"
+
+        ativos.append({
+            "nome": produto["nome"], "loja": produto["loja"], "url": produto["url"],
+            "preco": preco_atual,
+            "var_ultima": var_ultima,
+            "janelas": [("24h", var24), ("7d", variacao_em(24 * 7)), ("30d", variacao_em(24 * 30))],
+            "minimo": min(precos), "maximo": max(precos),
+            "mudou_em": historico[-1]["q"],
+            "visto_em": historico[-1].get("v") or historico[-1]["q"],
+            "direcao": direcao,
+            "grafico": grafico_de_linha(precos, direcao),
+        })
+
+    # quem mais mexeu aparece primeiro, igual ranking de cripto
+    ativos.sort(key=lambda a: abs(a["janelas"][0][1] or a["var_ultima"] or 0), reverse=True)
+    return render_template("mercado.html", ativos=ativos)
+
+
+def grafico_de_linha(precos, direcao):
+    """Desenha o grafico de linha (SVG) da serie de precos, em degrau —
+    o preco vale ate o momento em que mudou, como num livro de ofertas."""
+    if len(precos) < 2:
+        precos = [precos[0], precos[0]]
+    largura, altura, margem = 600.0, 64.0, 4.0
+    menor, maior = min(precos), max(precos)
+    faixa = (maior - menor) or 1.0
+
+    passos = []
+    n = len(precos)
+    for i, preco in enumerate(precos):
+        x = margem + i * (largura - 2 * margem) / (n - 1)
+        y = altura - margem - (preco - menor) / faixa * (altura - 2 * margem)
+        if passos:
+            passos.append(f"H{x:.1f}")   # anda reto no preco antigo...
+        passos.append(f"{'M' if not passos else 'V'}{'%.1f %.1f' % (x, y) if not passos else '%.1f' % y}")
+    caminho = " ".join(passos)
+
+    cor = {"sobe": "#57d98a", "desce": "#ef8b7e"}.get(direcao, "#9fb3aa")
+    return (
+        f'<svg class="grafico-preco" viewBox="0 0 {largura:.0f} {altura:.0f}" '
+        f'preserveAspectRatio="none" role="img" aria-label="grafico de preco">'
+        f'<path d="{caminho}" fill="none" stroke="{cor}" stroke-width="2" '
+        f'stroke-linejoin="round" stroke-linecap="round"/></svg>'
+    )
 
 
 @app.route("/saude")
@@ -1687,6 +1622,27 @@ def formatar_reais(valor):
     if not isinstance(valor, (int, float)) or isinstance(valor, bool):
         return "—"
     return f"R$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
+
+
+@app.template_filter("atras")
+def formatar_atras(iso):
+    """Vira 'há 32 s', 'há 5 min', 'há 3 dias', 'há 2 meses' — como cripto."""
+    if not isinstance(iso, str) or not iso:
+        return "—"
+    try:
+        momento = datetime.fromisoformat(iso)
+    except ValueError:
+        return "—"
+    segundos = max(0, (datetime.now(timezone.utc) - momento).total_seconds())
+    for limite, divisor, nome, plural in (
+        (60, 1, "s", "s"), (3600, 60, "min", "min"), (86400, 3600, "h", "h"),
+        (2592000, 86400, "dia", "dias"), (31536000, 2592000, "mês", "meses"),
+    ):
+        if segundos < limite:
+            n = int(segundos // divisor)
+            return f"há {max(n, 1)} {nome if n <= 1 else plural}"
+    n = int(segundos // 31536000)
+    return f"há {n} ano" + ("s" if n > 1 else "")
 
 
 preparar_primeira_execucao()
